@@ -1,2 +1,1 @@
-# transformer-rl-strategy-games
-Transformers for reinforcement learning in complex strategy games.
+# Transformers for Reinforcement Learning in Strategy Games
