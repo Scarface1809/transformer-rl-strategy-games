@@ -45,7 +45,14 @@ class SimpleAgent:
         action_logits = torch.stack([x.reshape(()) if x.ndim==0 else x for x in action_logits])
 
         # --- Sample action ---
+        action_logits = torch.nan_to_num(action_logits, nan=0.0, posinf=0.0, neginf=0.0)
         probs = F.softmax(action_logits, dim=0)
+        probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+        prob_sum = probs.sum()
+        if prob_sum <= 0:
+            probs = torch.ones_like(probs) / probs.numel()
+        else:
+            probs = probs / prob_sum
         action_idx = torch.multinomial(probs, 1).item()
         action = legal_actions[action_idx]
         log_prob = torch.log(probs[action_idx] + 1e-8)
