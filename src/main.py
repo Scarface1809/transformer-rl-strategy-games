@@ -1,13 +1,94 @@
+import argparse
+import json
+import os
+import time
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 
 from envs.simple_env import SimpleHispaniaEnv
-from models.simple_transformer_model import SimpleTransformerModel as SimpleModel
+from models.simple_transformer_model import SimpleTransformerModel
+from models.simple_model import SimpleModel
 from agents.simple_agent import SimpleAgent
 from agents.random_agent import RandomAgent
+
+
+def _state_to_dict(state):
+    return {
+        "turn_number": int(state.turn_number),
+        "current_nation": int(state.current_nation),
+        "done": bool(state.done),
+        "vp_scores": {int(k): int(v) for k, v in state.vp_scores.items()},
+        "units": [
+            {
+                "id": int(u.id),
+                "nation": int(u.nation),
+                "tile": int(u.tile),
+                "movement_points": int(u.movement_points),
+                "alive": bool(u.alive),
+            }
+            for u in state.units.values()
+        ],
+    }
+
+
+def _action_to_dict(action, end_turn_id):
+    unit_id, target_tile = action
+    return {
+        "unit_id": int(unit_id),
+        "target_tile": int(target_tile),
+        "type": "end_turn" if unit_id == end_turn_id else "move",
+    }
+
+
+def _tiles_to_list(env: SimpleHispaniaEnv):
+    tiles = []
+    for i in range(env.num_tiles):
+        t = env.tiles[i]
+        tiles.append(
+            {
+                "id": int(t.id),
+                "terrain": t.terrain.name,
+                "neighbors": [int(n) for n in t.neighbors],
+            }
+        )
+    return tiles
+
+
+def _write_log(path, env, states, actions, rewards, dones, meta):
+    log = {
+        "meta": meta,
+        "tiles": _tiles_to_list(env),
+        "states": states,
+        "actions": actions,
+        "rewards": rewards,
+        "dones": dones,
+    }
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(log, f, indent=2)
+
+
+def _build_model(model_type, env, d_model, n_heads, n_layers, device):
+    if model_type == "simple":
+        model = SimpleModel(
+            num_tiles=env.num_tiles,
+            num_nations=env.num_nations,
+            d_model=d_model,
+        )
+    else:
+        model = SimpleTransformerModel(
+            num_tiles=env.num_tiles,
+            num_nations=env.num_nations,
+            d_model=d_model,
+            n_heads=n_heads,
+            n_layers=n_layers,
+        )
+    return model.to(device)
+
 
 # -------------------------
 # Self-play training
@@ -16,20 +97,22 @@ def train_selfplay(
     num_episodes=3000,
     gamma=0.99,
     device="cpu",
-    debug=True
+    debug=True,
+    model_type="transformer",
+    d_model=32,
+    n_heads=4,
+    n_layers=2,
+    board="random",
 ):
     env = SimpleHispaniaEnv(
         num_nations=4,
         num_tiles=25,
         max_turns=20,
-        initial_units_per_nation=4
+        initial_units_per_nation=4,
+        board=board,
     )
 
-    model = SimpleModel(
-        num_tiles=env.num_tiles,
-        num_nations=env.num_nations,
-        d_model=32
-    ).to(device)
+    model = _build_model(model_type, env, d_model, n_heads, n_layers, device)
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     agent = SimpleAgent(model, device=device, debug=debug)
@@ -67,7 +150,14 @@ def train_selfplay(
             values = torch.stack(traj['values'])
             returns = compute_returns(rewards, gamma).to(device)
             advantages = returns - values.detach()
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            if advantages.numel() > 1:
+                adv_std = advantages.std(unbiased=False)
+                if adv_std > 1e-8:
+                    advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
+                else:
+                    advantages = advantages - advantages.mean()
+            else:
+                advantages = advantages - advantages.mean()
 
             policy_loss = -(log_probs * advantages).mean()
             entropy = -(torch.exp(log_probs) * log_probs).mean()
@@ -102,14 +192,25 @@ def compute_returns(rewards, gamma=0.99):
 # -------------------------
 # Evaluation
 # -------------------------
-def evaluate_final(model, num_games=100, device="cpu"):
+def evaluate_final(
+    model,
+    num_games=100,
+    device="cpu",
+    record_path=None,
+    model_type="transformer",
+    d_model=32,
+    n_heads=4,
+    n_layers=2,
+    board="random",
+):
     print(f"\nFinal Evaluation: model vs 3 random agents over {num_games} games...")
 
     env = SimpleHispaniaEnv(
         num_nations=4,
         num_tiles=9,
         max_turns=20,
-        initial_units_per_nation=3
+        initial_units_per_nation=3,
+        board=board,
     )
 
     model_agent = SimpleAgent(model, device=device)
@@ -118,11 +219,21 @@ def evaluate_final(model, num_games=100, device="cpu"):
 
     model_wins = random_wins = ties = 0
 
-    for _ in range(num_games):
+    last_game_record = None
+
+    for game_idx in range(num_games):
         env.reset()
         done = False
         step_count = 0
         max_steps = 1000
+        capture = record_path is not None and game_idx == num_games - 1
+
+        if capture:
+            states = []
+            actions = []
+            rewards = []
+            dones = []
+            states.append(_state_to_dict(env.state))
 
         while not done and step_count < max_steps:
             agent = agents[env.state.current_nation]
@@ -131,8 +242,16 @@ def evaluate_final(model, num_games=100, device="cpu"):
             else:
                 action = agent.select_action(env)
 
-            _, done, _ = env.step(action)
+            _, done, reward = env.step(action)
+            if capture:
+                actions.append(_action_to_dict(action, env.END_TURN))
+                rewards.append(float(reward))
+                dones.append(bool(done))
+                states.append(_state_to_dict(env.state))
             step_count += 1
+
+        if capture:
+            last_game_record = (states, actions, rewards, dones, step_count)
 
         model_vp = env.state.vp_scores.get(0, 0)
         random_vp = sum(env.state.vp_scores.get(i, 0) for i in [1, 2, 3])
@@ -147,21 +266,77 @@ def evaluate_final(model, num_games=100, device="cpu"):
     win_rate = model_wins / num_games
     print(f"Model wins: {model_wins} | Random wins: {random_wins} | Ties: {ties} | Win rate: {win_rate:.2f}")
 
+    if record_path and last_game_record:
+        states, actions, rewards, dones, step_count = last_game_record
+        meta = {
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "agent": "model_vs_randoms",
+            "model_type": model_type,
+            "board": board,
+            "num_tiles": env.num_tiles,
+            "num_nations": env.num_nations,
+            "initial_units_per_nation": env.initial_units_per_nation,
+            "max_turns": env.max_turns,
+            "max_steps": step_count,
+            "d_model": d_model,
+            "n_heads": n_heads if model_type == "transformer" else None,
+            "n_layers": n_layers if model_type == "transformer" else None,
+            "device": device,
+        }
+        _write_log(record_path, env, states, actions, rewards, dones, meta)
+        print(f"Wrote last game log to {record_path}")
+
 # -------------------------
 # Main
 # -------------------------
 def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    parser = argparse.ArgumentParser(description="Train and evaluate on SimpleHispaniaEnv.")
+    parser.add_argument("--model", choices=["simple", "transformer"], default="transformer")
+    parser.add_argument("--board", choices=["random", "hispania"], default="random")
+    parser.add_argument("--num-episodes", type=int, default=2000)
+    parser.add_argument("--num-games", type=int, default=100)
+    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--d-model", type=int, default=32)
+    parser.add_argument("--n-heads", type=int, default=4)
+    parser.add_argument("--n-layers", type=int, default=2)
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--debug", dest="debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--no-debug", dest="debug", action="store_false", help="Disable debug logging")
+    parser.set_defaults(debug=True)
+    parser.add_argument("--record-last-game", action="store_true")
+    parser.add_argument("--log-out", default=None, help="Path to JSON log for last evaluation game")
+    args = parser.parse_args()
+
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     model = train_selfplay(
-        num_episodes=2000,
-        gamma=0.99,
+        num_episodes=args.num_episodes,
+        gamma=args.gamma,
         device=device,
-        debug=True
+        debug=args.debug,
+        model_type=args.model,
+        d_model=args.d_model,
+        n_heads=args.n_heads,
+        n_layers=args.n_layers,
+        board=args.board,
     )
 
-    evaluate_final(model, num_games=100, device=device)
+    record_path = None
+    if args.record_last_game or args.log_out:
+        record_path = args.log_out or os.path.join("logs", "last_game.json")
+
+    evaluate_final(
+        model,
+        num_games=args.num_games,
+        device=device,
+        record_path=record_path,
+        model_type=args.model,
+        d_model=args.d_model,
+        n_heads=args.n_heads,
+        n_layers=args.n_layers,
+        board=args.board,
+    )
 
 if __name__ == "__main__":
     main()
