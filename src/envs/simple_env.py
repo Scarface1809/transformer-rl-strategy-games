@@ -18,6 +18,7 @@ class TerrainType(Enum):
 @dataclass
 class Tile:
     id: int
+    name: str
     terrain: TerrainType
     neighbors: List[int]
 
@@ -48,19 +49,34 @@ class SimpleHispaniaEnv:
                  num_nations=4,
                  initial_units_per_nation=4,
                  max_turns=20,
-                 seed=None):
+                 seed=None,
+                 board="random"):
         self.num_tiles = num_tiles
         self.num_nations = num_nations
         self.initial_units_per_nation = initial_units_per_nation
         self.max_turns = max_turns
+        self.board = board
         self.rng = random.Random(seed)
 
-        self.tiles = self._create_random_map()
+        self.tiles = self._create_map()
         self.state = self._create_initial_state()
 
     # -------------------------
     # Map creation
     # -------------------------
+    def _create_map(self) -> Dict[int, Tile]:
+        if self.board == "hispania":
+            tiles = self._create_hispania_board()
+            self.num_tiles = len(tiles)
+            return tiles
+        if self.board != "random":
+            raise ValueError(f"Unknown board: {self.board}")
+        return self._create_random_map()
+
+    def _create_hispania_board(self) -> Dict[int, Tile]:
+        from envs.hispania_board import create_hispania_board
+        return create_hispania_board()
+
     def _create_random_map(self) -> Dict[int, Tile]:
         tiles = {}
         for i in range(self.num_tiles):
