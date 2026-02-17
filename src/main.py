@@ -13,54 +13,13 @@ from models.simple_transformer_model import SimpleTransformerModel
 from models.simple_model import SimpleModel
 from agents.simple_agent import SimpleAgent
 from agents.random_agent import RandomAgent
-
-
-def _state_to_dict(state):
-    return {
-        "turn_number": int(state.turn_number),
-        "current_nation": int(state.current_nation),
-        "done": bool(state.done),
-        "vp_scores": {int(k): int(v) for k, v in state.vp_scores.items()},
-        "units": [
-            {
-                "id": int(u.id),
-                "nation": int(u.nation),
-                "tile": int(u.tile),
-                "movement_points": int(u.movement_points),
-                "alive": bool(u.alive),
-            }
-            for u in state.units.values()
-        ],
-    }
-
-
-def _action_to_dict(action, end_turn_id):
-    unit_id, target_tile = action
-    return {
-        "unit_id": int(unit_id),
-        "target_tile": int(target_tile),
-        "type": "end_turn" if unit_id == end_turn_id else "move",
-    }
-
-
-def _tiles_to_list(env: SimpleHispaniaEnv):
-    tiles = []
-    for i in range(env.num_tiles):
-        t = env.tiles[i]
-        tiles.append(
-            {
-                "id": int(t.id),
-                "terrain": t.terrain.name,
-                "neighbors": [int(n) for n in t.neighbors],
-            }
-        )
-    return tiles
+from utils.seeding import set_seeds
 
 
 def _write_log(path, env, states, actions, rewards, dones, meta):
     log = {
         "meta": meta,
-        "tiles": _tiles_to_list(env),
+        "tiles": env.tiles_to_list(),
         "states": states,
         "actions": actions,
         "rewards": rewards,
@@ -103,6 +62,7 @@ def train_selfplay(
     n_heads=4,
     n_layers=2,
     board="random",
+    seed=None,
 ):
     env = SimpleHispaniaEnv(
         num_nations=4,
@@ -110,6 +70,7 @@ def train_selfplay(
         max_turns=20,
         initial_units_per_nation=4,
         board=board,
+        seed=seed,
     )
 
     model = _build_model(model_type, env, d_model, n_heads, n_layers, device)
@@ -202,6 +163,7 @@ def evaluate_final(
     n_heads=4,
     n_layers=2,
     board="random",
+    seed=None,
 ):
     print(f"\nFinal Evaluation: model vs 3 random agents over {num_games} games...")
 
@@ -211,6 +173,7 @@ def evaluate_final(
         max_turns=20,
         initial_units_per_nation=3,
         board=board,
+        seed=seed,
     )
 
     model_agent = SimpleAgent(model, device=device)
@@ -233,7 +196,7 @@ def evaluate_final(
             actions = []
             rewards = []
             dones = []
-            states.append(_state_to_dict(env.state))
+            states.append(env.state_to_dict())
 
         while not done and step_count < max_steps:
             agent = agents[env.state.current_nation]
@@ -244,10 +207,10 @@ def evaluate_final(
 
             _, done, reward = env.step(action)
             if capture:
-                actions.append(_action_to_dict(action, env.END_TURN))
+                actions.append(env.action_to_dict(action))
                 rewards.append(float(reward))
                 dones.append(bool(done))
-                states.append(_state_to_dict(env.state))
+                states.append(env.state_to_dict())
             step_count += 1
 
         if capture:
@@ -293,6 +256,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train and evaluate on SimpleHispaniaEnv.")
     parser.add_argument("--model", choices=["simple", "transformer"], default="transformer")
     parser.add_argument("--board", choices=["random", "hispania"], default="random")
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--num-episodes", type=int, default=2000)
     parser.add_argument("--num-games", type=int, default=100)
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -309,6 +273,8 @@ def main():
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    if args.seed is not None:
+        set_seeds(args.seed)
 
     model = train_selfplay(
         num_episodes=args.num_episodes,
@@ -320,6 +286,7 @@ def main():
         n_heads=args.n_heads,
         n_layers=args.n_layers,
         board=args.board,
+        seed=args.seed,
     )
 
     record_path = None
@@ -336,6 +303,7 @@ def main():
         n_heads=args.n_heads,
         n_layers=args.n_layers,
         board=args.board,
+        seed=args.seed,
     )
 
 if __name__ == "__main__":

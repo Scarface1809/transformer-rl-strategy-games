@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 class SimpleModel(nn.Module):
     def __init__(self, num_tiles, num_nations, d_model=64):

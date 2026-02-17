@@ -81,7 +81,7 @@ class SimpleHispaniaEnv:
         tiles = {}
         for i in range(self.num_tiles):
             terrain = TerrainType.DIFFICULT if self.rng.random() < 0.25 else TerrainType.CLEAR
-            tiles[i] = Tile(i, terrain, [])
+            tiles[i] = Tile(i, f"Tile {i}", terrain, [])
 
         for i in range(self.num_tiles):
             neighbors = self.rng.sample([t for t in range(self.num_tiles) if t != i],
@@ -108,6 +108,49 @@ class SimpleHispaniaEnv:
     def reset(self):
         self.state = self._create_initial_state()
         return self._encode_state()
+
+    # -------------------------
+    # Serialization helpers
+    # -------------------------
+    def state_to_dict(self):
+        state = self.state
+        return {
+            "turn_number": int(state.turn_number),
+            "current_nation": int(state.current_nation),
+            "done": bool(state.done),
+            "vp_scores": {int(k): int(v) for k, v in state.vp_scores.items()},
+            "units": [
+                {
+                    "id": int(u.id),
+                    "nation": int(u.nation),
+                    "tile": int(u.tile),
+                    "movement_points": int(u.movement_points),
+                    "alive": bool(u.alive),
+                }
+                for u in state.units.values()
+            ],
+        }
+
+    def action_to_dict(self, action):
+        unit_id, target_tile = action
+        return {
+            "unit_id": int(unit_id),
+            "target_tile": int(target_tile),
+            "type": "end_turn" if unit_id == self.END_TURN else "move",
+        }
+
+    def tiles_to_list(self):
+        tiles = []
+        for i in range(self.num_tiles):
+            t = self.tiles[i]
+            tiles.append(
+                {
+                    "id": int(t.id),
+                    "terrain": t.terrain.name,
+                    "neighbors": [int(n) for n in t.neighbors],
+                }
+            )
+        return tiles
 
     # -------------------------
     # Legal actions

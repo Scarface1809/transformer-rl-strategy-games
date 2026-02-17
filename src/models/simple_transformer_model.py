@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 class SimpleTransformerModel(nn.Module):
     def __init__(self, num_tiles, num_nations, d_model=64, n_heads=4, n_layers=2):

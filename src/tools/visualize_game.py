@@ -32,7 +32,6 @@ class Config:
     min_window_width: int = 1400
     min_window_height: int = 900
 
-
 @dataclass
 class Theme:
     """Color theme"""

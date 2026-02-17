@@ -3,71 +3,21 @@ import json
 import os
 import sys
 import time
-import random
-from typing import Dict, Any, List
+from pathlib import Path
 
-import numpy as np
 import torch
 
-# Allow running as a script from repo root
-THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-SRC_DIR = os.path.dirname(THIS_DIR)
-if SRC_DIR not in sys.path:
-    sys.path.append(SRC_DIR)
+THIS_DIR = Path(__file__).resolve().parent
+SRC_DIR = THIS_DIR.parent
+
+if str(SRC_DIR) not in sys.path:
+    sys.path.append(str(SRC_DIR))
 
 from envs.simple_env import SimpleHispaniaEnv
 from models.simple_transformer_model import SimpleTransformerModel
 from agents.simple_agent import SimpleAgent
 from agents.random_agent import RandomAgent
-
-
-def _state_to_dict(state) -> Dict[str, Any]:
-    return {
-        "turn_number": int(state.turn_number),
-        "current_nation": int(state.current_nation),
-        "done": bool(state.done),
-        "vp_scores": {int(k): int(v) for k, v in state.vp_scores.items()},
-        "units": [
-            {
-                "id": int(u.id),
-                "nation": int(u.nation),
-                "tile": int(u.tile),
-                "movement_points": int(u.movement_points),
-                "alive": bool(u.alive),
-            }
-            for u in state.units.values()
-        ],
-    }
-
-
-def _action_to_dict(action, end_turn_id: int) -> Dict[str, Any]:
-    unit_id, target_tile = action
-    return {
-        "unit_id": int(unit_id),
-        "target_tile": int(target_tile),
-        "type": "end_turn" if unit_id == end_turn_id else "move",
-    }
-
-
-def _tiles_to_list(env: SimpleHispaniaEnv) -> List[Dict[str, Any]]:
-    tiles = []
-    for i in range(env.num_tiles):
-        t = env.tiles[i]
-        tiles.append(
-            {
-                "id": int(t.id),
-                "terrain": t.terrain.name,
-                "neighbors": [int(n) for n in t.neighbors],
-            }
-        )
-    return tiles
-
-
-def _set_seeds(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
+from utils.seeding import set_seeds
 
 def _load_model(env: SimpleHispaniaEnv, checkpoint_path: str, device: str, d_model: int) -> SimpleTransformerModel:
     model = SimpleTransformerModel(
@@ -111,7 +61,7 @@ def main():
 
     args = parser.parse_args()
 
-    _set_seeds(args.seed)
+    set_seeds(args.seed)
 
     env = SimpleHispaniaEnv(
         num_tiles=args.num_tiles,
@@ -135,7 +85,7 @@ def main():
     rewards = []
     dones = []
 
-    states.append(_state_to_dict(env.state))
+    states.append(env.state_to_dict())
 
     done = False
     step_count = 0
@@ -147,10 +97,10 @@ def main():
 
         _, done, reward = env.step(action)
 
-        actions.append(_action_to_dict(action, env.END_TURN))
+        actions.append(env.action_to_dict(action))
         rewards.append(float(reward))
         dones.append(bool(done))
-        states.append(_state_to_dict(env.state))
+        states.append(env.state_to_dict())
 
         step_count += 1
 
@@ -170,7 +120,7 @@ def main():
     }
     log = {
         "meta": meta,
-        "tiles": _tiles_to_list(env),
+        "tiles": env.tiles_to_list(),
         "states": states,
         "actions": actions,
         "rewards": rewards,
@@ -185,7 +135,6 @@ def main():
             json.dump(log, f)
 
     print(f"Wrote log with {len(actions)} steps to {args.out}")
-
 
 if __name__ == "__main__":
     main()

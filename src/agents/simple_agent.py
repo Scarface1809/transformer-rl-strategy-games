@@ -23,25 +23,23 @@ class SimpleAgent:
         if units:
             nation_idxs = torch.tensor([u.nation for u in units], device=self.device)
             piece_tile_idxs = torch.tensor([u.tile for u in units], device=self.device)
-            unit_ids = torch.tensor([u.id for u in units], device=self.device)
         else:
             nation_idxs = torch.empty(0, dtype=torch.long, device=self.device)
             piece_tile_idxs = torch.empty(0, dtype=torch.long, device=self.device)
-            unit_ids = torch.empty(0, dtype=torch.long, device=self.device)
 
         active_nation = torch.tensor(state.current_nation, dtype=torch.long, device=self.device)
 
         # --- Forward pass ---
-        tile_logits, value = self.model(tile_idxs, terrain_types, nation_idxs, piece_tile_idxs, active_nation)
+        policy_logits, value = self.model(tile_idxs, terrain_types, nation_idxs, piece_tile_idxs, active_nation)
 
         # --- Legal actions ---
         legal_actions = env.legal_actions()
         action_logits = []
         for unit_id, target_tile in legal_actions:
             if unit_id == env.END_TURN:
-                action_logits.append(self.model.end_turn_logit)
+                action_logits.append(policy_logits[-1])
             else:
-                action_logits.append(tile_logits[target_tile])
+                action_logits.append(policy_logits[target_tile])
         action_logits = torch.stack([x.reshape(()) if x.ndim==0 else x for x in action_logits])
 
         # --- Sample action ---
