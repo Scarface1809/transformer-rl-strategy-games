@@ -2,10 +2,6 @@ from envs.simple_env import Tile
 from envs.simple_env import TerrainType as T
 from typing import Dict
 
-# =========================
-# Board creation
-# =========================
-
 def create_hispania_board() -> Dict[int, Tile]:
     tiles = {
 

@@ -50,12 +50,17 @@ class SimpleHispaniaEnv:
                  initial_units_per_nation=4,
                  max_turns=20,
                  seed=None,
-                 board="random"):
+                 board="random",
+                 randomize_map_on_reset=None):
         self.num_tiles = num_tiles
         self.num_nations = num_nations
         self.initial_units_per_nation = initial_units_per_nation
         self.max_turns = max_turns
         self.board = board
+        if randomize_map_on_reset is None:
+            self.randomize_map_on_reset = (board == "random")
+        else:
+            self.randomize_map_on_reset = randomize_map_on_reset
         self.rng = random.Random(seed)
 
         self.tiles = self._create_map()
@@ -106,6 +111,8 @@ class SimpleHispaniaEnv:
         return state
 
     def reset(self):
+        if self.randomize_map_on_reset:
+            self.tiles = self._create_map()
         self.state = self._create_initial_state()
         return self._encode_state()
 
@@ -208,16 +215,17 @@ class SimpleHispaniaEnv:
     # Turn handling
     # -------------------------
     def _advance_turn(self):
-        # reset movement points for current nation units
-        for u in self.state.units.values():
-            if u.nation == self.state.current_nation and u.alive:
-                u.movement_points = 2
-
         # advance nation
         self.state.current_nation = (self.state.current_nation + 1) % self.num_nations
         if self.state.current_nation == 0:
             self.state.turn_number += 1
             self._check_game_end()
+
+        # reset movement points for the new current nation
+        if not self.state.done:
+            for u in self.state.units.values():
+                if u.nation == self.state.current_nation and u.alive:
+                    u.movement_points = 2
 
     def _check_game_end(self):
         if self.state.turn_number >= self.max_turns:

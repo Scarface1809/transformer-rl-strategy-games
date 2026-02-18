@@ -18,6 +18,7 @@ class SimpleModel(nn.Module):
 
         # --- Policy ---
         self.tile_policy = nn.Linear(d_model, 1)      # per-tile logit
+        self.unit_policy = nn.Linear(d_model, 1)      # per-unit logit
         self.end_turn_logit = nn.Parameter(torch.tensor(0.0))
 
         # --- Value ---
@@ -62,9 +63,12 @@ class SimpleModel(nn.Module):
 
         # ---- Policy ----
         tile_logits = self.tile_policy(tile_state).squeeze(-1)
-        policy_logits = torch.cat([tile_logits, self.end_turn_logit.expand(1)], dim=0)
+        if piece_encs.numel() > 0:
+            unit_logits = self.unit_policy(piece_encs).squeeze(-1)
+        else:
+            unit_logits = torch.empty(0, device=device)
 
         # ---- Value ----
         pooled = tile_state.mean(dim=0)
         value = self.value_head(pooled).squeeze(-1)
-        return policy_logits, value
+        return tile_logits, unit_logits, value

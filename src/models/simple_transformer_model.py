@@ -29,6 +29,7 @@ class SimpleTransformerModel(nn.Module):
 
         # ---- Heads ----
         self.tile_policy = nn.Linear(d_model, 1)
+        self.unit_policy = nn.Linear(d_model, 1)
         self.end_turn_logit = nn.Parameter(torch.tensor(0.0))
 
         self.value_head = nn.Sequential(
@@ -75,11 +76,13 @@ class SimpleTransformerModel(nn.Module):
 
         # ---- Policy ----
         tile_logits = self.tile_policy(tile_context).squeeze(-1)
-        policy_logits = torch.cat(
-            [tile_logits, self.end_turn_logit.expand(1)], dim=0
-        )
+        if tokens.size(1) > tile_tokens.size(1):
+            unit_context = memory.squeeze(0)[tile_tokens.size(1):]
+            unit_logits = self.unit_policy(unit_context).squeeze(-1)
+        else:
+            unit_logits = torch.empty(0, device=device)
 
         # ---- Value ----
         value = self.value_head(tile_context.mean(dim=0)).squeeze(-1)
 
-        return policy_logits, value
+        return tile_logits, unit_logits, value
