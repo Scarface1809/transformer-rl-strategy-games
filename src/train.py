@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 
 from agents.simple_agent import SimpleAgent
+from envs.simple_env import SimpleHispaniaEnv
 from config import TrainingConfig
 
 def compute_returns(rewards, gamma):
@@ -40,11 +41,21 @@ def compute_loss(trajectories, gamma, device):
 
     return loss, avg_return, max_return, min_return
 
-def train_selfplay(env, model, optimizer, cfg: TrainingConfig, device):
+def train_episodes(
+    cfg: TrainingConfig,
+    env: SimpleHispaniaEnv,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    num_episodes: int,
+    start_episode: int = 0,
+):
     agent = SimpleAgent(model, device=device, debug=cfg.debug)
     running_loss = 0.0
+    running_count = 0
 
-    for episode in range(cfg.num_episodes):
+    for episode in range(num_episodes):
+        episode_num = start_episode + episode + 1
 
         env.reset()
 
@@ -74,14 +85,16 @@ def train_selfplay(env, model, optimizer, cfg: TrainingConfig, device):
         optimizer.step()
         
         running_loss += loss.item()
+        running_count += 1
 
-        if cfg.debug and (episode + 1) % 50 == 0:
+        if cfg.debug:
             print(
-                f"Episode {episode + 1:4d} | "
+                f"Episode {episode_num:4d} | "
                 f"Loss: {loss.item():.3f} | "
-                f"Running Avg Loss: {running_loss / 50:.3f} | "
+                f"Running Avg Loss: {running_loss / max(running_count, 1):.3f} | "
                 f"Avg Return: {avg_ret:.2f} | "
                 f"Max Return: {max_ret:.2f} | "
                 f"Min Return: {min_ret:.2f}"
             )
             running_loss = 0.0
+            running_count = 0
