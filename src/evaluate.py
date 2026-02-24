@@ -45,10 +45,12 @@ def evaluate(env, model, num_games, device):
             game_dones.append(bool(done))
 
         # Compute model return for win rate
-        model_score = env.state.vp_scores.get(0, 0)
-        other_score = sum(env.state.vp_scores.get(i, 0) for i in range(1, env.num_nations))
+        scores = env.state.vp_scores
+        model_score = scores.get(0, 0)
+        max_score = max(scores.values())
         returns_per_game.append(model_score)
-        if model_score > other_score:
+
+        if model_score == max_score:  # Counting draw as win for now
             wins += 1
 
         # Save last game log
