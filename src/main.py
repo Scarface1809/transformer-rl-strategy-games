@@ -1,6 +1,7 @@
 import torch
 import json
 import os
+import time
 
 from envs.simple_env import SimpleHispaniaEnv
 from models.simple_model import SimpleModel
@@ -48,6 +49,8 @@ def save_last_game(log_data, log_dir="logs", filename="last_eval_game.json"):
 
 # --- Main Pipeline ---
 def main():
+    start_time = time.time()
+
     cfg = Config()  # load default configuration
 
     # Device
@@ -112,6 +115,11 @@ def main():
     summary, last_game_log = evaluate(env, model, cfg.evaluation.num_games, device)
 
     save_last_game(last_game_log)
+
+    # Time
+    end_time = time.time()
+    elapsed = end_time - start_time
+    print(f"\nTempo total de execução: {elapsed:.2f} segundos")
 
 if __name__ == "__main__":
     main()
