@@ -72,8 +72,8 @@ def load_fonts():
     pygame.freetype.init()
     
     # Try to load custom font from same directory
-    font_path = Path(__file__).parent / "smallest_pixel-7.ttf"
-    
+    font_path = Path(__file__).parent / "assets/smallest_pixel-7.ttf"
+
     try:
         if font_path.exists():
             return {
