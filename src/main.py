@@ -2,8 +2,9 @@ import torch
 import json
 import os
 import time
+import numpy as np
 
-from envs.simple_env import SimpleHispaniaEnv
+from envs.env import SimpleHispaniaEnv
 from models.simple_model import SimpleModel
 from models.simple_transformer_model import SimpleTransformerModel
 from config import Config, EnvConfig, ModelConfig
@@ -11,23 +12,25 @@ from evaluate import evaluate
 from train import train_episodes
 from plotting import plot_eval_history
 
+# ---------------------------------------------------------------------------
+# Builders
+# ---------------------------------------------------------------------------
+
 # --- Build Environment ---
-def build_env(env_cfg: EnvConfig) -> SimpleHispaniaEnv:
+def build_env(env_cfg: EnvConfig, seed: int) -> SimpleHispaniaEnv:
     """Build environment from EnvConfig."""
-    return SimpleHispaniaEnv(
-        preset=env_cfg.preset,
-    )
+    return SimpleHispaniaEnv(preset=env_cfg.preset, seed=seed)
 
 # --- Build Model ---
 def build_model(model_cfg: ModelConfig, env: SimpleHispaniaEnv) -> torch.nn.Module:
     if model_cfg.model_type == "simple":
-        model = SimpleModel(
+        return SimpleModel(
             num_tiles=env.num_tiles,
             num_nations=env.num_nations,
             d_model=model_cfg.d_model
         )
     elif model_cfg.model_type == "transformer":
-        model = SimpleTransformerModel(
+        return SimpleTransformerModel(
             num_tiles=env.num_tiles,
             num_nations=env.num_nations,
             d_model=model_cfg.d_model,
@@ -37,37 +40,33 @@ def build_model(model_cfg: ModelConfig, env: SimpleHispaniaEnv) -> torch.nn.Modu
     else:
         raise ValueError(f"Unknown model type: {model_cfg.model_type}")
 
-    return model
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 
-def save_last_game(log_data, log_dir="logs", filename="last_eval_game.json"):
-    """Save last game log to JSON"""
+def save_eval_games(all_game_logs, log_dir="logs/last_eval_games"):
+    """Save each game log as a separate JSON file inside a folder."""
     os.makedirs(log_dir, exist_ok=True)
-    filepath = os.path.join(log_dir, filename)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(log_data, f, indent=2)
-    print(f"Last evaluation game saved to {filepath}")
+    for i, game_log in enumerate(all_game_logs):
+        filepath = os.path.join(log_dir, f"game_{i:03d}.json")
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(game_log, f, indent=2)
+    print(f"Saved {len(all_game_logs)} game logs to {log_dir}/")
 
-# --- Main Pipeline ---
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
+
 def main():
     start_time = time.time()
+    cfg = Config()
 
-    cfg = Config()  # load default configuration
-
-    # Device
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    seed = int(np.random.randint(0, 1_000_000))
 
-    # Environment
-    env = build_env(cfg.env)
-
-    # Model
+    env = build_env(cfg.env, seed)
     model = build_model(cfg.model, env).to(device)
-
-    # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.training.lr)
-
-    # Asserts
-    if cfg.evaluation.frequency <= 0:
-        raise ValueError("Evaluation frequency must be a positive integer.")
 
     eval_history = []
     trained = 0
@@ -112,14 +111,14 @@ def main():
         if plot_path:
             print(f"Saved evaluation plot to {plot_path}")
 
-    summary, last_game_log = evaluate(env, model, cfg.evaluation.num_games, device)
+    # Final evaluation
+    summary, all_game_logs = evaluate(env, model, cfg.evaluation.num_games, device, record_all=True)
 
-    save_last_game(last_game_log)
+    save_eval_games(all_game_logs)
 
     # Time
-    end_time = time.time()
-    elapsed = end_time - start_time
-    print(f"\nTempo total de execução: {elapsed:.2f} segundos")
+    elapsed = time.time() - start_time
+    print(f"\nTotal runtime: {elapsed:.2f}s")
 
 if __name__ == "__main__":
     main()

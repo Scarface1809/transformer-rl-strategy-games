@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 from agents.simple_agent import SimpleAgent
-from envs.simple_env import SimpleHispaniaEnv
+from envs.env import SimpleHispaniaEnv
 from config import TrainingConfig
 
 def compute_returns(rewards, gamma):

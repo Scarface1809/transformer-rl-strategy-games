@@ -1,64 +1,46 @@
-import json
-import os
 from agents.simple_agent import SimpleAgent
 from agents.random_agent import RandomAgent
+from envs.env import SimpleHispaniaEnv
 
-def evaluate(env, model, num_games, device):
-    """Run evaluation, return summary and last game data including tiles, rewards, and dones."""
+def evaluate(env: SimpleHispaniaEnv, model, num_games: int, device, record_all: bool = False):
+    """Run evaluation, return summary and game log data."""
     model_agent = SimpleAgent(model, device=device)
     random_agent = RandomAgent()
     agents = [model_agent] + [random_agent] * (env.num_nations - 1)
-    
+
     wins = 0
     returns_per_game = []
-    last_game_log = {
-        "tiles": env.tiles_to_list(),  # assume env.tiles_to_list() returns list of dicts
-        "states": [],
-        "actions": [],
-        "rewards": [],
-        "dones": [],
-    }
+    all_game_logs = []  # collect all when record_all=True
+    last_game_log = {}
 
     for game_idx in range(num_games):
         env.reset()
-        done = False
-        game_states = []
-        game_actions = []
-        game_rewards = []
-        game_dones = []
+        is_last = (game_idx == num_games - 1)
+        
+        game_log = env.to_log_dict() if (record_all or is_last) else {}
 
+        done = False
         while not done:
             agent = agents[env.state.current_nation]
-
-            # Select action properly
             if isinstance(agent, SimpleAgent):
                 action, log_prob, value = agent.select_action(env)
             else:
                 action = agent.select_action(env)
+            _, done, _ = env.step(action)
 
-            _, done, reward = env.step(action)
+            if record_all or is_last:
+                game_log["actions"].append(env.action_to_dict(action))
 
-            # Log everything for last game
-            game_states.append(env.state_to_dict())
-            game_actions.append(env.action_to_dict(action))
-            game_rewards.append(float(reward))
-            game_dones.append(bool(done))
+        if record_all:
+            all_game_logs.append(game_log)
+        elif is_last:
+            last_game_log = game_log
 
-        # Compute model return for win rate
         scores = env.state.vp_scores
         model_score = scores.get(0, 0)
-        max_score = max(scores.values())
         returns_per_game.append(model_score)
-
-        if model_score == max_score:  # Counting draw as win for now
+        if model_score == max(scores.values()):
             wins += 1
-
-        # Save last game log
-        if game_idx == num_games - 1:
-            last_game_log["states"] = game_states
-            last_game_log["actions"] = game_actions
-            last_game_log["rewards"] = game_rewards
-            last_game_log["dones"] = game_dones
 
     summary = {
         "win_rate": wins / num_games,
@@ -66,4 +48,5 @@ def evaluate(env, model, num_games, device):
         "max_return": max(returns_per_game),
         "min_return": min(returns_per_game),
     }
-    return summary, last_game_log
+
+    return summary, (all_game_logs if record_all else last_game_log)
