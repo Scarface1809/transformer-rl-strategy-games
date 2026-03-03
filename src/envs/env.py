@@ -1,5 +1,6 @@
+from __future__ import annotations
 import numpy as np
-from envs.hispania_board import create_hispania_board, create_hispania_units
+from envs.registry import get_preset
 from envs.entities import Tile, Unit, TerrainType, GameState
 
 # =========================
@@ -7,22 +8,53 @@ from envs.entities import Tile, Unit, TerrainType, GameState
 # =========================
 class SimpleHispaniaEnv:
     END_TURN = -1
-    DAMAGE_PER_ATTACKING_UNIT = 0.5
     MAX_TURNS = 20
+    DAMAGE_PER_ATTACKING_UNIT = 0.5
 
-    def __init__(self, preset="hispania"):
+    def __init__(self, preset: str = "hispania", seed: int | None = None):
         self.preset = preset
-        if preset == "hispania":
-            self.tiles = create_hispania_board()
-            self.state = GameState(units=create_hispania_units(self.tiles))
-            self.num_tiles = len(self.tiles)
-            self.num_nations = max(u.nation for u in self.state.units.values()) + 1
-        else:
-            raise ValueError(f"Unknown preset: {preset}")
+        self.seed = seed
+        self.rng = np.random.default_rng(seed)
+        
+        board_fn, units_fn = get_preset(preset)
+        self.tiles = board_fn()
+        self.num_tiles = len(self.tiles)
+
+        initial_units = units_fn(self.tiles)
+        self.state = GameState(units=initial_units)
+        self.num_nations = max(u.nation for u in self.state.units.values()) + 1
+
+    @classmethod
+    def from_log(cls, log: dict) -> "SimpleHispaniaEnv":
+        preset = log.get("preset", "hispania")
+        seed = log.get("seed")
+        env = cls(preset=preset, seed=seed)
+
+        env.tiles = {
+            int(tid): Tile(
+                id=int(t["id"]),
+                name=t["name"],
+                terrain=TerrainType[t["terrain"]],
+                neighbors=[int(n) for n in t["neighbors"]],
+            )
+            for tid, t in log["tiles"].items()
+        }
+        env.num_tiles = len(env.tiles)
+
+        # Restore initial state
+        env.state_from_dict(log["initial_state"])
+        env.num_nations = max(u.nation for u in env.state.units.values()) + 1
+
+        return env
+
 
     def reset(self):
-        if self.preset == "hispania":
-            self.state = GameState(units=create_hispania_units(self.tiles))
+        if self.seed is not None:
+            self.rng = np.random.default_rng(self.seed)
+        board_fn, units_fn = get_preset(self.preset)
+        self.tiles = board_fn()
+        self.state = GameState(units=units_fn(self.tiles))
+        self.num_nations = max(u.nation for u in self.state.units.values()) + 1
         return self._encode_state()
 
     # -------------------------
@@ -90,7 +122,7 @@ class SimpleHispaniaEnv:
         for defeated in defenders[:destroyed_count]:
             defeated.alive = False
 
-        self.state.vp_scores[unit.nation] += destroyed_count
+        self.state.vp_scores[unit.nation] = self.state.vp_scores.get(unit.nation, 0) + destroyed_count
         reward += float(destroyed_count)
         return reward
 
@@ -135,6 +167,13 @@ class SimpleHispaniaEnv:
     # -------------------------
     # Serialization helpers
     # -------------------------
+    def tiles_to_dict(self):
+        return {
+            t.id: {"id": t.id, "name": t.name,
+                   "terrain": t.terrain.name, "neighbors": list(t.neighbors)}
+            for t in self.tiles.values()
+        }
+
     def state_to_dict(self):
         state = self.state
         return {
@@ -142,8 +181,8 @@ class SimpleHispaniaEnv:
             "current_nation": int(state.current_nation),
             "done": bool(state.done),
             "vp_scores": {int(k): int(v) for k, v in state.vp_scores.items()},
-            "units": [
-                {
+            "units": {
+                str(u.id): {   # JSON keys must be strings
                     "id": int(u.id),
                     "nation": int(u.nation),
                     "tile": int(u.tile),
@@ -151,7 +190,36 @@ class SimpleHispaniaEnv:
                     "alive": bool(u.alive),
                 }
                 for u in state.units.values()
-            ],
+            },
+        }
+
+    def state_from_dict(self, data: dict):
+        """Restore state from dict"""
+        self.state.turn_number = int(data.get("turn_number", 0))
+        self.state.current_nation = int(data.get("current_nation", 0))
+        self.state.done = bool(data.get("done", False))
+        self.state.vp_scores = {int(k): int(v) for k, v in data["vp_scores"].items()}
+        self.state.units.clear()
+        for uid_str, udata in data["units"].items():
+            uid = int(uid_str)
+            self.state.units[uid] = Unit(
+                id=uid,
+                nation=int(udata["nation"]),
+                tile=int(udata["tile"]),
+                movement_points=int(udata["movement_points"]),
+                alive=bool(udata["alive"]),
+            )
+        for u in self.state.units.values():
+            self.state.vp_scores.setdefault(u.nation, 0)
+    
+    def to_log_dict(self) -> dict:
+        """Single entry point for building a game log. Caller appends to actions[]."""
+        return {
+            "preset":        self.preset,
+            "seed":          self.seed,
+            "tiles":         self.tiles_to_dict(),
+            "initial_state": self.state_to_dict(),
+            "actions":       [],
         }
 
     def action_to_dict(self, action):
@@ -162,15 +230,8 @@ class SimpleHispaniaEnv:
             "type": "end_turn" if unit_id == self.END_TURN else "move",
         }
 
-    def tiles_to_list(self):
-        tiles = []
-        for i in range(self.num_tiles):
-            t = self.tiles[i]
-            tiles.append(
-                {
-                    "id": int(t.id),
-                    "terrain": t.terrain.name,
-                    "neighbors": [int(n) for n in t.neighbors],
-                }
-            )
-        return tiles
+    def action_from_dict(self, data: dict):
+        """Convert dict from log into environment action tuple"""
+        if data.get("type") == "end_turn":
+            return (self.END_TURN, -1)
+        return (int(data["unit_id"]), int(data["target_tile"]))
