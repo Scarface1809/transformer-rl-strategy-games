@@ -1,8 +1,8 @@
-import random
 from typing import Dict
 from envs.entities import Tile, Unit, TerrainType as T
+from envs.registry import register_preset
 
-def create_hispania_board() -> Dict[int, Tile]:
+def create_board() -> Dict[int, Tile]:
     tiles = {
 
         # =====================
@@ -89,7 +89,7 @@ def create_hispania_board() -> Dict[int, Tile]:
 
     return tiles
 
-def create_hispania_units(tiles: Dict[int, Tile], num_nations: int = 4, units_per_nation: int = 10) -> Dict[int, Unit]:
+def create_units(tiles: Dict[int, Tile], num_nations: int = 4, units_per_nation: int = 10) -> Dict[int, Unit]:
     units: Dict[int, Unit] = {}
     uid = 0
 
@@ -116,3 +116,7 @@ def create_hispania_units(tiles: Dict[int, Tile], num_nations: int = 4, units_pe
                 uid += 1
 
     return units
+
+@register_preset("hispania")
+def _register():
+        return create_board, create_units
