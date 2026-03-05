@@ -4,6 +4,13 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 # =========================
+# Phase
+# =========================
+class Phase(Enum):
+    GROWTH = 1
+    MOVEMENT = 2
+
+# =========================
 # Terrain
 # =========================
 class TerrainType(Enum):
@@ -34,4 +41,6 @@ class GameState:
     current_nation: int = 0
     done: bool = False
     vp_scores: Dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    pop_points: Dict[int, int] = field(default_factory=dict)
     units: Dict[int, Unit] = field(default_factory=dict)
+    phase: Phase = Phase.GROWTH
