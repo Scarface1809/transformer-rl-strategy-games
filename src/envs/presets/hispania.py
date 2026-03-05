@@ -48,7 +48,7 @@ def create_board() -> Dict[int, Tile]:
 
         27: Tile(27, "Badajoz", T.CLEAR, [30, 31]),
         28: Tile(28, "Vetonia", T.CLEAR, [24, 29]),
-        29: Tile(29, "Algarve", T.CLEAR, [28]),
+        29: Tile(29, "Algarve", T.DIFFICULT, [28]),
         30: Tile(30, "Onuba", T.CLEAR, [27, 31]),
         31: Tile(31, "Baccula", T.CLEAR, [23, 24, 27, 30, 32]),
         32: Tile(32, "Corduba", T.CLEAR, [23, 31, 39, 41]),
