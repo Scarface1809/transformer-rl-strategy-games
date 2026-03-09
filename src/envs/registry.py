@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Callable, Dict, Tuple, TYPE_CHECKING
+
 if TYPE_CHECKING:
     from envs.entities import Tile, Unit
 
@@ -7,6 +8,7 @@ BoardFactory = Callable[[], Dict[int, "Tile"]]
 UnitsFactory = Callable[[Dict[int, "Tile"]], Dict[int, "Unit"]]
 
 _REGISTRY: Dict[str, Tuple[BoardFactory, UnitsFactory]] = {}
+
 
 def register_preset(name: str):
     """Decorator to register a preset by name.
@@ -17,10 +19,12 @@ def register_preset(name: str):
         def _register():
             return create_hispania_board, create_hispania_units
     """
+
     def decorator(factory_fn: Callable[[], Tuple[BoardFactory, UnitsFactory]]):
         board_fn, units_fn = factory_fn()
         _REGISTRY[name] = (board_fn, units_fn)
         return factory_fn
+
     return decorator
 
 
@@ -42,6 +46,7 @@ def _load_presets():
     import importlib
     import pkgutil
     import envs.presets as _presets_pkg
+
     for _, module_name, _ in pkgutil.iter_modules(_presets_pkg.__path__):
         importlib.import_module(f"envs.presets.{module_name}")
 

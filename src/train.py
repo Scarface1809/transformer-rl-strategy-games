@@ -1,9 +1,9 @@
 import torch
 import torch.nn.functional as F
-
 from agents.simple_agent import SimpleAgent
 from envs.env import SimpleHispaniaEnv
 from config import TrainingConfig
+
 
 def compute_returns(rewards, gamma):
     R = 0
@@ -14,6 +14,7 @@ def compute_returns(rewards, gamma):
         returns.insert(0, R)
 
     return torch.tensor(returns, dtype=torch.float32)
+
 
 def compute_loss(trajectories, gamma, device):
     policy_losses = []
@@ -40,6 +41,7 @@ def compute_loss(trajectories, gamma, device):
     min_return = min(episode_returns) if episode_returns else 0
 
     return loss, avg_return, max_return, min_return
+
 
 def train_episodes(
     cfg: TrainingConfig,
@@ -83,7 +85,7 @@ def train_episodes(
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        
+
         running_loss += loss.item()
         running_count += 1
 
