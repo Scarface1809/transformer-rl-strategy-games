@@ -62,87 +62,152 @@ def create_board() -> Dict[int, Tile]:
         # =====================
         # NORTH
         # =====================
-        0: _make_tile(0, "Galicia", M, [(1, N), (2, N)]),
-        1: _make_tile(1, "Oporto", C, [(0, N), (14, N), (15, N)]),
+        0: _make_tile(0, "Galicia", M, [(1, R), (2, N)]),
+        1: _make_tile(1, "Oporto", C, [(0, R), (14, N), (15, R)]),
         2: _make_tile(2, "Asturia", M, [(0, N), (1, N), (3, N), (13, N), (14, N)]),
-        3: _make_tile(3, "Cantabria", M, [(2, N), (4, N), (11, N), (12, N), (13, N)]),
+        3: _make_tile(
+            3, "Cantabria", M, [(2, N), (4, N), (11, N), (12, N), (13, N), (5, P)]
+        ),
         4: _make_tile(4, "Vizcaya", M, [(3, N), (5, N), (10, N), (11, N)]),
-        5: _make_tile(5, "Pamplona", C, [(4, N), (6, N), (8, N), (10, N)]),
+        5: _make_tile(
+            5,
+            "Pamplona",
+            C,
+            [(4, N), (6, N), (8, N), (10, N), (54, N), (11, P), (3, P), (9, R)],
+        ),
         6: _make_tile(6, "Pyrenees Occidentalis", M, [(5, N), (7, N), (8, N), (54, N)]),
         7: _make_tile(
             7, "Pyrenees Orientalis", M, [(6, N), (8, N), (47, N), (53, N), (54, N)]
         ),
-        8: _make_tile(8, "Osca", C, [(5, N), (6, N), (7, N), (47, N)]),
-        9: _make_tile(9, "Saragossa", C, [(10, N), (16, N), (19, N), (43, N), (45, N)]),
+        8: _make_tile(8, "Osca", C, [(5, N), (6, N), (7, N), (47, N), (9, R), (45, R)]),
+        9: _make_tile(
+            9,
+            "Saragossa",
+            C,
+            [(10, N), (16, N), (19, N), (43, N), (45, N), (20, P), (5, R), (8, R)],
+        ),
         10: _make_tile(10, "Numantina", M, [(4, N), (5, N), (9, N), (11, N), (19, N)]),
-        11: _make_tile(11, "Burgos", C, [(3, N), (4, N), (10, N), (12, N), (19, N)]),
-        12: _make_tile(12, "Palencia", C, [(3, N), (11, N), (13, N)]),
-        13: _make_tile(13, "Leon", M, [(2, N), (3, N), (12, N), (14, N)]),
-        14: _make_tile(14, "Duero", M, [(1, N), (2, N), (13, N)]),
+        11: _make_tile(
+            11,
+            "Burgos",
+            C,
+            [(3, N), (4, N), (10, N), (12, N), (19, N), (18, R), (5, P)],
+        ),
+        12: _make_tile(12, "Palencia", C, [(3, N), (11, N), (13, N), (17, R), (18, R)]),
+        13: _make_tile(13, "Leon", M, [(2, N), (3, N), (12, N), (14, N), (17, R)]),
+        14: _make_tile(14, "Duero", M, [(1, N), (2, N), (13, N), (15, R), (17, R)]),
         # =====================
         # CENTER
         # =====================
-        15: _make_tile(15, "Termes", C, [(25, N), (26, N)]),
+        15: _make_tile(15, "Termes", C, [(1, R), (17, P), (25, N), (26, R), (14, R)]),
         16: _make_tile(
-            16, "Cuenca", M, [(9, N), (19, N), (20, N), (41, N), (42, N), (43, N)]
+            16,
+            "Cuenca",
+            M,
+            [(9, N), (19, N), (20, N), (41, N), (42, N), (43, N), (23, R)],
         ),
-        17: _make_tile(17, "Salamanca", C, [(18, N), (22, N), (25, N)]),
-        18: _make_tile(18, "Segovia", C, [(17, N), (19, N), (21, N), (22, N)]),
+        17: _make_tile(
+            17,
+            "Salamanca",
+            C,
+            [(15, P), (18, N), (22, N), (25, N), (14, R), (12, R), (13, R)],
+        ),
+        18: _make_tile(
+            18,
+            "Segovia",
+            C,
+            [(17, N), (19, N), (21, N), (22, N), (12, R), (11, R), (20, N)],
+        ),
         19: _make_tile(
             19, "Atienza", M, [(9, N), (10, N), (11, N), (16, N), (18, N), (20, N)]
         ),
-        20: _make_tile(20, "Guadalajara", C, [(16, N), (19, N), (21, N)]),
-        21: _make_tile(21, "Avila", M, [(18, N), (20, N), (22, N)]),
-        22: _make_tile(22, "Alcantra", M, [(17, N), (18, N), (21, N), (25, N)]),
-        23: _make_tile(23, "Toletum", C, [(24, N), (31, N), (32, N), (41, N)]),
-        24: _make_tile(24, "Estremadura", C, [(23, N), (28, N), (31, N)]),
-        25: _make_tile(25, "Lusitania", M, [(15, N), (17, N), (22, N), (26, N)]),
-        26: _make_tile(26, "Tago", C, [(15, N), (25, N)]),
+        20: _make_tile(
+            20,
+            "Guadalajara",
+            C,
+            [(16, N), (19, N), (21, N), (18, N), (9, P), (43, P), (42, P), (23, R)],
+        ),
+        21: _make_tile(21, "Avila", M, [(18, N), (20, N), (22, N), (24, R), (23, R)]),
+        22: _make_tile(
+            22, "Alcantra", M, [(17, N), (18, N), (21, N), (25, N), (24, R)]
+        ),
+        23: _make_tile(
+            23,
+            "Toletum",
+            C,
+            [(24, N), (31, N), (32, N), (41, N), (21, R), (20, R), (16, R)],
+        ),
+        24: _make_tile(
+            24,
+            "Estremadura",
+            C,
+            [(23, N), (28, N), (31, N), (25, R), (22, R), (21, R), (27, R)],
+        ),
+        25: _make_tile(
+            25, "Lusitania", M, [(15, N), (17, N), (22, N), (26, N), (28, R), (24, R)]
+        ),
+        26: _make_tile(26, "Tago", C, [(15, R), (25, N), (28, R)]),
         # =====================
         # SOUTH
         # =====================
-        27: _make_tile(27, "Badajoz", C, [(30, N), (31, N)]),
-        28: _make_tile(28, "Vetonia", C, [(24, N), (29, N)]),
-        29: _make_tile(29, "Algarve", M, [(28, N)]),
-        30: _make_tile(30, "Onuba", C, [(27, N), (31, N)]),
-        31: _make_tile(31, "Baccula", C, [(23, N), (24, N), (27, N), (30, N), (32, N)]),
-        32: _make_tile(32, "Corduba", C, [(23, N), (31, N), (39, N), (41, N)]),
-        33: _make_tile(33, "Bactica", C, [(36, N), (37, N)]),
-        34: _make_tile(34, "Sevilla", C, [(35, N), (36, N)]),
-        35: _make_tile(35, "Gades", C, [(34, N), (36, N), (38, ST)]),
+        27: _make_tile(27, "Badajoz", C, [(30, N), (31, N), (24, R), (28, R)]),
+        28: _make_tile(28, "Vetonia", C, [(24, N), (29, N), (26, R), (25, R), (27, R)]),
+        29: _make_tile(29, "Algarve", M, [(28, N), (30, R)]),
+        30: _make_tile(30, "Onuba", C, [(27, N), (31, N), (29, R), (35, R), (34, R)]),
+        31: _make_tile(
+            31,
+            "Baccula",
+            C,
+            [(23, N), (24, N), (27, N), (30, N), (32, N), (34, R), (33, R)],
+        ),
+        32: _make_tile(32, "Corduba", C, [(23, N), (31, N), (39, N), (41, N), (33, R)]),
+        33: _make_tile(
+            33, "Bactica", C, [(36, N), (37, N), (39, N), (34, R), (32, R), (31, R)]
+        ),
+        34: _make_tile(34, "Sevilla", C, [(35, N), (36, N), (30, R), (31, R), (33, R)]),
+        35: _make_tile(35, "Gades", C, [(34, N), (36, N), (38, ST), (30, R)]),
         36: _make_tile(
-            36, "Malaca", C, [(33, N), (34, N), (35, N), (37, N), (38, N), (52, ST)]
+            36, "Malaca", C, [(33, N), (34, N), (35, N), (37, N), (38, ST), (52, ST)]
         ),
         37: _make_tile(37, "Granada", M, [(33, N), (36, N), (39, N)]),
-        38: _make_tile(38, "Tingis", C, [(35, ST), (36, N), (52, N)]),
+        38: _make_tile(38, "Tingis", C, [(35, ST), (36, ST), (52, N)]),
         # =====================
         # EAST
         # =====================
-        39: _make_tile(39, "Cartagena", C, [(32, N), (37, N), (40, N), (41, N)]),
-        40: _make_tile(40, "Denia", C, [(39, N), (41, N), (49, ST)]),
+        39: _make_tile(
+            39, "Cartagena", C, [(32, N), (37, N), (40, N), (41, N), (33, N)]
+        ),
+        40: _make_tile(40, "Denia", C, [(39, N), (41, N), (49, ST), (42, R)]),
         41: _make_tile(
             41, "Calatrava", C, [(16, N), (23, N), (32, N), (39, N), (40, N), (42, N)]
         ),
         42: _make_tile(
-            42, "Valencia", C, [(16, N), (41, N), (43, N), (44, N), (49, ST)]
+            42,
+            "Valencia",
+            C,
+            [(16, N), (41, N), (43, N), (44, R), (49, ST), (20, P), (40, R)],
         ),
         43: _make_tile(
-            43, "Albarracin", M, [(9, N), (16, N), (42, N), (44, N), (45, N)]
+            43, "Albarracin", M, [(9, N), (16, N), (42, N), (44, N), (45, N), (20, P)]
         ),
-        44: _make_tile(44, "Castellon", M, [(42, N), (43, N), (45, N)]),
-        45: _make_tile(45, "Dertosa", C, [(9, N), (43, N), (44, N)]),
-        46: _make_tile(46, "Tarraco", C, [(47, N), (48, N)]),
-        47: _make_tile(47, "Illerda", C, [(7, N), (8, N), (46, N), (48, N)]),
+        44: _make_tile(44, "Castellon", M, [(42, R), (43, N), (45, N)]),
+        45: _make_tile(
+            45, "Dertosa", C, [(9, N), (43, N), (44, N), (46, R), (47, R), (8, R)]
+        ),
+        46: _make_tile(46, "Tarraco", C, [(47, N), (48, N), (45, R)]),
+        47: _make_tile(
+            47, "Illerda", C, [(7, N), (8, N), (46, N), (48, N), (53, N), (45, R)]
+        ),
         48: _make_tile(48, "Barcino", C, [(46, N), (47, N), (53, N)]),
-        49: _make_tile(49, "Ibiza", C, [(40, ST), (42, ST), (50, N)]),
-        50: _make_tile(50, "Mallorca", C, [(49, N), (51, N)]),
-        51: _make_tile(51, "Minorca", C, [(50, N)]),
+        49: _make_tile(49, "Ibiza", C, [(40, ST), (42, ST), (50, ST)]),
+        50: _make_tile(50, "Mallorca", C, [(49, ST), (51, ST)]),
+        51: _make_tile(51, "Minorca", C, [(50, ST)]),
         # =====================
         # OFFMAP
         # =====================
         52: _make_tile(52, "Africa", C, [(36, ST), (38, N)]),
-        53: _make_tile(53, "Septimania", C, [(7, N), (48, N)]),
-        54: _make_tile(54, "Aquitania", C, [(6, N), (7, N)]),
+        53: _make_tile(53, "Septimania", C, [(7, N), (48, N), (47, N)]),
+        54: _make_tile(54, "Aquitania", C, [(6, N), (7, N), (5, N)]),
     }
 
     return tiles
