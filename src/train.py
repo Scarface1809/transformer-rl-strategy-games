@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from agents.simple_agent import SimpleAgent
+from agents.random_agent import RandomAgent
 from envs.env import SimpleHispaniaEnv
 from config import TrainingConfig
 
@@ -30,6 +31,8 @@ def compute_loss(trajectories, gamma, device):
         values = torch.stack(traj["values"])
         advantage = returns - values.detach()
 
+        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+
         policy_losses.append(-(log_probs * advantage).mean())
         value_losses.append(F.mse_loss(values, returns))
 
@@ -51,8 +54,17 @@ def train_episodes(
     device: torch.device,
     num_episodes: int,
     start_episode: int = 0,
+    opponent_model: torch.nn.Module = None,
 ):
-    agent = SimpleAgent(model, device=device, debug=cfg.debug)
+    model.train()  # Safety
+
+    if opponent_model is not None:
+        opponent_agent = SimpleAgent(opponent_model, device=device, debug=False)
+    else:
+        opponent_agent = RandomAgent()
+
+    learner_agent = SimpleAgent(model, device=device, debug=cfg.debug)
+
     running_loss = 0.0
     running_count = 0
 
@@ -60,30 +72,44 @@ def train_episodes(
         episode_num = start_episode + episode + 1
 
         env.reset()
-
-        trajectories = {
-            n: {"log_probs": [], "values": [], "rewards": []}
-            for n in range(env.num_nations)
-        }
+        learner_traj = {"log_probs": [], "values": [], "rewards": []}
 
         done = False
-
         while not done:
-
             nation = env.state.current_nation
 
-            action, log_prob, value = agent.select_action(env)
+            if nation == 0:
+                action, log_prob, value = learner_agent.select_action(env)
+                _, done, reward = env.step(action)
+                learner_traj["log_probs"].append(log_prob)
+                learner_traj["values"].append(value)
+                learner_traj["rewards"].append(reward)
+            else:
+                if isinstance(opponent_agent, RandomAgent):
+                    action = opponent_agent.select_action(env)
+                else:
+                    with torch.no_grad():
+                        action, _, _ = opponent_agent.select_action(env)
+                _, done, _ = env.step(action)
+
 
             _, done, reward = env.step(action)
+                terminal_reward = 10.0
+            elif vp_diff == 0:
+                terminal_reward = 0.0
+            else:
+                terminal_reward = -10.0
 
-            trajectories[nation]["log_probs"].append(log_prob)
-            trajectories[nation]["values"].append(value)
-            trajectories[nation]["rewards"].append(reward)
+            if learner_traj["rewards"]:
+                learner_traj["rewards"][-1] += terminal_reward
 
+        trajectories = {0: learner_traj}
         loss, avg_ret, max_ret, min_ret = compute_loss(trajectories, cfg.gamma, device)
 
         optimizer.zero_grad()
         loss.backward()
+        # Clip gradient (Prevent big gradient spikes)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         running_loss += loss.item()
@@ -98,5 +124,3 @@ def train_episodes(
                 f"Max Return: {max_ret:.2f} | "
                 f"Min Return: {min_ret:.2f}"
             )
-            running_loss = 0.0
-            running_count = 0

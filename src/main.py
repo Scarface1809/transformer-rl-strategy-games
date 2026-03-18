@@ -1,4 +1,5 @@
 import torch
+import copy
 import json
 import os
 import time
@@ -58,12 +59,20 @@ def main():
     start_time = time.time()
     cfg = Config()
 
-    # Opt cpu threads
-    torch.set_num_threads(torch.get_num_threads() - 1)
-    torch.set_num_interop_threads(torch.get_num_threads() - 1)
+    # Optimize CPU threads
+    orig_threads = torch.get_num_threads()
+    torch.set_num_threads(orig_threads - 1)
+    torch.set_num_interop_threads(orig_threads - 1)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+    print(f"Env Config: {cfg.env}")
+    print(f"Model Config: {cfg.model}")
+    print(f"Training Config: {cfg.training}")
+    print(f"Evaluation Config: {cfg.evaluation}")
+
     seed = int(np.random.randint(0, 1_000_000))
+    print(f"Random seed: {seed}\n")
 
     env = build_env(cfg.env, seed)
     model = build_model(cfg.model, env).to(device)
@@ -72,6 +81,8 @@ def main():
     eval_history = []
     trained = 0
     total = cfg.training.num_games
+
+    opponent_model = None
 
     # Initial Evaluation - PreTraining
     summary, _ = evaluate(env, model, cfg.evaluation.num_games, device)
@@ -92,6 +103,7 @@ def main():
         }
     )
 
+    # Training loop
     while trained < total:
         remaining = total - trained
         batch = min(cfg.evaluation.frequency, remaining)
@@ -104,8 +116,14 @@ def main():
             device,
             num_episodes=batch,
             start_episode=trained,
+            opponent_model=opponent_model,
         )
         trained += batch
+
+        opponent_model = copy.deepcopy(model)
+        opponent_model.eval()
+        for p in opponent_model.parameters():
+            p.requires_grad_(False)
 
         if trained % cfg.evaluation.frequency == 0:
             summary, _ = evaluate(env, model, cfg.evaluation.num_games, device)
@@ -139,6 +157,8 @@ def main():
     )
 
     save_eval_games(all_game_logs)
+
+    # TODO / ISSUE: Model doesnt see edges. How to solve that hwo to encode it? Question rigt now.
 
     # Time
     elapsed = time.time() - start_time
