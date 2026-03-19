@@ -156,9 +156,32 @@ def main():
         env, model, cfg.evaluation.num_games, device, record_all=True
     )
 
+    eval_history.append(
+        {
+            "episode": trained,
+            "win_rate": summary["win_rate"],
+            "avg_return": summary["avg_return"],
+            "max_return": summary["max_return"],
+            "min_return": summary["min_return"],
+        }
+    )
+
+    if cfg.evaluation.debug:
+        print(
+            f"[Eval @ {trained:4d}] "
+            f"Win Rate: {summary['win_rate']:.2%} | "
+            f"Avg Return: {summary['avg_return']:.2f} | "
+            f"Max Return: {summary['max_return']:.2f} | "
+            f"Min Return: {summary['min_return']:.2f}"
+        )
+
     save_eval_games(all_game_logs)
 
     # TODO / ISSUE: Model doesnt see edges. How to solve that hwo to encode it? Question rigt now.
+
+    # AREA REWARD to check system working.
+
+    # Slides desenhos da rede
 
     # Time
     elapsed = time.time() - start_time
