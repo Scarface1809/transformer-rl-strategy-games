@@ -17,9 +17,10 @@ def compute_returns(rewards, gamma):
     return torch.tensor(returns, dtype=torch.float32)
 
 
-def compute_loss(trajectories, gamma, device):
+def compute_loss(trajectories, gamma, device, entropy_coef=0.01):
     policy_losses = []
     value_losses = []
+    entropy_losses = []
     episode_returns = []
 
     for traj in trajectories.values():
@@ -31,14 +32,22 @@ def compute_loss(trajectories, gamma, device):
         values = torch.stack(traj["values"])
         advantage = returns - values.detach()
 
-        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+        std = advantage.std()
+        if std > 1e-3:
+            advantage = (advantage - advantage.mean()) / (std + 1e-8)
+        else:
+            advantage = advantage - advantage.mean()
 
         policy_losses.append(-(log_probs * advantage).mean())
         value_losses.append(F.mse_loss(values, returns))
-
+        entropy_losses.append((-log_probs).mean())
         episode_returns.append(sum(traj["rewards"]))
 
-    loss = torch.stack(policy_losses).mean() + torch.stack(value_losses).mean()
+    loss = (
+        torch.stack(policy_losses).mean()
+        + torch.stack(value_losses).mean()
+        - entropy_coef * torch.stack(entropy_losses).mean()
+    )
     avg_return = sum(episode_returns) / len(episode_returns) if episode_returns else 0
     max_return = max(episode_returns) if episode_returns else 0
     min_return = min(episode_returns) if episode_returns else 0
@@ -80,7 +89,7 @@ def train_episodes(
 
             if nation == 0:
                 action, log_prob, value = learner_agent.select_action(env)
-                _, done, reward = env.step(action)
+                done, reward = env.step(action)
                 learner_traj["log_probs"].append(log_prob)
                 learner_traj["values"].append(value)
                 learner_traj["rewards"].append(reward)
@@ -90,10 +99,16 @@ def train_episodes(
                 else:
                     with torch.no_grad():
                         action, _, _ = opponent_agent.select_action(env)
-                _, done, _ = env.step(action)
+                done, _ = env.step(action)
 
+        if env.state.done:
+            model_score = env.state.vp_scores.get(0, 0)
+            best_opponent = max(
+                (v for k, v in env.state.vp_scores.items() if k != 0), default=0
+            )
+            vp_diff = model_score - best_opponent
 
-            _, done, reward = env.step(action)
+            if vp_diff > 0:
                 terminal_reward = 10.0
             elif vp_diff == 0:
                 terminal_reward = 0.0
@@ -109,7 +124,7 @@ def train_episodes(
         optimizer.zero_grad()
         loss.backward()
         # Clip gradient (Prevent big gradient spikes)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
         optimizer.step()
 
         running_loss += loss.item()
