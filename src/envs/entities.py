@@ -9,26 +9,27 @@ from typing import Dict
 # Phase
 # =========================
 class Phase(Enum):
-    GROWTH = 1
-    MOVEMENT = 2
+    GROWTH = 0
+    MOVEMENT = 1
+    BATTLE = 2
 
 
 # =========================
 # Terrain
 # =========================
 class TerrainType(Enum):
-    CLEAR = 1
-    MOUNTAIN = 2
+    CLEAR = 0
+    MOUNTAIN = 1
 
 
 # =========================
 # Edge types
 # =========================
 class EdgeType(Enum):
-    NORMAL = "normal"
-    STRAIT = "strait"
-    RIVER = "river"
-    PATH = "path"
+    NORMAL = 0
+    STRAIT = 1
+    RIVER = 2
+    PATH = 3
 
 
 # =========================
@@ -162,10 +163,10 @@ class Unit:
 
 
 class ActionType(Enum):
-    MOVE_UNIT = "move"
-    END_TURN = "end_turn"
-    END_PHASE = "end_phase"
-    BUY_UNIT = "buy_unit"
+    END_PHASE = 0
+    MOVE_UNIT = 1
+    BUY_UNIT = 2
+    RESOLVE_BATTLE = 3
 
 
 @dataclass(frozen=True)
@@ -181,10 +182,6 @@ class Action:
         return cls(ActionType.MOVE_UNIT, unit_id=unit_id, target_tile=target_tile)
 
     @classmethod
-    def end_turn(cls) -> "Action":
-        return cls(ActionType.END_TURN)
-
-    @classmethod
     def end_phase(cls) -> "Action":
         return cls(ActionType.END_PHASE)
 
@@ -192,15 +189,19 @@ class Action:
     def buy_unit(cls, target_tile: int) -> "Action":
         return cls(ActionType.BUY_UNIT, target_tile=target_tile)
 
+    @classmethod
+    def resolve_battle(cls, tile_id: int) -> "Action":
+        return cls(ActionType.RESOLVE_BATTLE, target_tile=tile_id)
+
     # ── Helpers ─────────────────────────────────────────────
 
     def display_text(self) -> str:
-        if self.type == ActionType.END_TURN:
-            return "End turn"
         if self.type == ActionType.END_PHASE:
             return "End phase"
         if self.type == ActionType.BUY_UNIT:
             return f"Buy unit → T{self.target_tile}"
+        if self.type == ActionType.RESOLVE_BATTLE:
+            return f"Resolve battle → T{self.target_tile}"
         return f"Move U{self.unit_id} → T{self.target_tile}"
 
     # ── Serialization ─────────────────────────────────────────────

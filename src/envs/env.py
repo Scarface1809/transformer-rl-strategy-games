@@ -35,6 +35,7 @@ class SimpleHispaniaEnv:
         self.state = GameState(units=units_fn(self.tiles))
         self.num_nations = max(u.nation for u in self.state.units.values()) + 1
 
+        self.state.vp_scores = {n: 0 for n in range(self.num_nations)}
         self.state.pop_points = {n: 0 for n in range(self.num_nations)}
         self.state.phase = Phase.GROWTH
         self._award_pop_points(self.state.current_nation)
@@ -76,16 +77,37 @@ class SimpleHispaniaEnv:
     def _get_edge(self, from_tile: int, to_tile: int) -> Edge | None:
         return self.tiles[from_tile].adjacencies.get(to_tile)
 
+    def _tiles_with_battles(self, nation: int) -> list[int]:
+        tiles = set()
+
+        for u in self.state.units.values():
+            if not u.alive:
+                continue
+
+            if u.nation == nation:
+                tile_id = u.tile
+
+                enemies = [
+                    v
+                    for v in self.state.units.values()
+                    if v.alive and v.tile == tile_id and v.nation != nation
+                ]
+
+                if enemies:
+                    tiles.add(tile_id)
+
+        return list(tiles)
+
     # -------------------------
     # Legal actions
     # -------------------------
     def legal_actions(self) -> list[Action]:
         nation = self.state.current_nation
+        # Default: End phase
         actions: list[Action] = []
 
         match (self.state.phase):
             case Phase.GROWTH:
-                # End Growth phase
                 actions.append(Action.end_phase())
                 if self.state.pop_points.get(nation, 0) >= self.UNIT_COST:
                     nation_tiles = self._get_nation_tiles(nation)
@@ -93,6 +115,7 @@ class SimpleHispaniaEnv:
                         if self._stacking_ok(tile_id, nation):
                             actions.append(Action.buy_unit(tile_id))
             case Phase.MOVEMENT:
+                actions.append(Action.end_phase())
                 for u in self.state.units.values():
                     if u.nation != nation or not u.alive or u.movement_points <= 0:
                         continue
@@ -104,8 +127,14 @@ class SimpleHispaniaEnv:
                             nbr_id, nation
                         ):
                             actions.append(Action.move(u.id, nbr_id))
-                # End turn action
-                actions.append(Action.end_turn())
+            case Phase.BATTLE:
+                battle_tiles = self._tiles_with_battles(nation)
+
+                for tile_id in battle_tiles:
+                    actions.append(Action.resolve_battle(tile_id))
+
+                if not battle_tiles:
+                    actions.append(Action.end_phase())
             case _:
                 print(f"Warning: unhandled phase {self.state.phase} in legal_actions()")
                 pass
@@ -115,42 +144,45 @@ class SimpleHispaniaEnv:
     # -------------------------
     # Step
     # -------------------------
-    def step(self, action: Action) -> tuple[np.ndarray, bool, float]:
+    def step(self, action: Action) -> tuple[bool, float]:
         reward = 0.0
 
         match action.type:
             case ActionType.END_PHASE:
                 if self.state.phase == Phase.GROWTH:
                     self.state.phase = Phase.MOVEMENT
-                else:
-                    print(
-                        f"Warning: END_PHASE action received in unexpected phase {self.state.phase}"
-                    )
-            case ActionType.END_TURN:
-                self._advance_turn()
+                elif self.state.phase == Phase.MOVEMENT:
+                    battle_tiles = self._tiles_with_battles(self.state.current_nation)
+                    if battle_tiles:
+                        self.state.phase = Phase.BATTLE
+                    else:
+                        self._advance_turn()
+                elif self.state.phase == Phase.BATTLE:
+                    self._advance_turn()
             case ActionType.BUY_UNIT:
                 reward = self._buy_and_place_unit(action.target_tile)
             case ActionType.MOVE_UNIT:
-                reward = self._move_and_attack(action.unit_id, action.target_tile)
+                reward = self._move_unit(action.unit_id, action.target_tile)
+            case ActionType.RESOLVE_BATTLE:
+                reward = self._resolve_battle(action.target_tile)
             case _:
                 print(f"Warning: unhandled action type {action.type} in step()")
 
-        return self._encode_state(), self.state.done, reward
+        return self.state.done, reward
 
     # -------------------------
     # Reset
     # -------------------------
     def reset(self):
-        if self.seed is not None:
-            self.rng = np.random.default_rng(self.seed)
+        self.rng = np.random.default_rng(self.seed)
         board_fn, units_fn = get_preset(self.preset)
         self.tiles = board_fn()
         self.state = GameState(units=units_fn(self.tiles))
         self.num_nations = max(u.nation for u in self.state.units.values()) + 1
+        self.state.vp_scores = {n: 0 for n in range(self.num_nations)}
         self.state.pop_points = {n: 0 for n in range(self.num_nations)}
         self.state.phase = Phase.GROWTH
         self._award_pop_points(self.state.current_nation)
-        return self._encode_state()
 
     # -------------------------
     # Growth: buy & place unit
@@ -183,12 +215,16 @@ class SimpleHispaniaEnv:
     # -------------------------
     # Movement & combat
     # -------------------------
-    def _move_and_attack(self, unit_id: int, target_tile_id: int) -> float:
+    def _move_unit(self, unit_id: int, target_tile_id: int) -> float:
         unit = self.state.units.get(unit_id)
         if unit is None or not unit.alive:
             return 0.0
 
         edge = self._get_edge(unit.tile, target_tile_id)
+
+        if edge is None:
+            return 0.0
+
         mp_cost, stops = self.tiles[target_tile_id].movement_cost(via_edge=edge)
 
         if mp_cost > unit.movement_points:
@@ -205,31 +241,54 @@ class SimpleHispaniaEnv:
             # TODO: RIVER edge — apply dice modifier on first battle round when
             #                    attacker crosses a RIVER edge into this tile
 
-        # --- Combat ---
-        attackers = [
-            u
-            for u in self.state.units.values()
-            if u.alive and u.tile == target_tile_id and u.nation == unit.nation
+        return 0.0
+
+    def _resolve_battle(self, tile_id: int) -> float:
+        units_on_tile = [
+            u for u in self.state.units.values() if u.alive and u.tile == tile_id
         ]
-        defenders = sorted(
-            (
-                u
-                for u in self.state.units.values()
-                if u.alive and u.tile == target_tile_id and u.nation != unit.nation
-            ),
-            key=lambda u: u.id,
+
+        assert units_on_tile, f"Resolve battle called on empty tile {tile_id}"
+
+        nation_groups = {}
+        for u in units_on_tile:
+            nation_groups.setdefault(u.nation, []).append(u)
+
+        assert len(nation_groups) > 1, f"No battle on tile {tile_id}"
+
+        kills = {
+            nation: int(np.floor(len(units) * self.DAMAGE_PER_ATTACKING_UNIT + 0.5))
+            for nation, units in nation_groups.items()
+        }
+
+        losses = {nation: 0 for nation in nation_groups}
+
+        # Roundign upwards the attack issue TODO
+
+        nations = list(nation_groups.keys())
+
+        for i, nation in enumerate(nations):
+            enemies = [n for n in nations if n != nation]
+
+            incoming_kills = sum(kills[e] for e in enemies)
+
+            actual_losses = min(len(nation_groups[nation]), incoming_kills)
+            losses[nation] = actual_losses
+
+        for nation, loss in losses.items():
+            for u in nation_groups[nation][:loss]:
+                u.alive = False
+
+        for nation in nations:
+            enemy_losses = sum(losses[enemy] for enemy in nations if enemy != nation)
+            self.state.vp_scores[nation] += enemy_losses
+
+        my_kills = sum(
+            losses[enemy] for enemy in nations if enemy != self.state.current_nation
         )
+        # my_losses = losses[self.state.current_nation]
 
-        total_damage = len(attackers) * self.DAMAGE_PER_ATTACKING_UNIT
-        destroyed_count = min(len(defenders), int(np.floor(total_damage + 0.5)))
-
-        for defeated in defenders[:destroyed_count]:
-            defeated.alive = False
-
-        self.state.vp_scores[unit.nation] = (
-            self.state.vp_scores.get(unit.nation, 0) + destroyed_count
-        )
-        return float(destroyed_count)
+        return float(my_kills)
 
     # -------------------------
     # Turn handling
@@ -256,34 +315,6 @@ class SimpleHispaniaEnv:
         alive_nations = {u.nation for u in self.state.units.values() if u.alive}
         if len(alive_nations) <= 1:
             self.state.done = True
-
-    # -------------------------
-    # Encoding
-    # -------------------------
-    def _encode_state(self) -> np.ndarray:
-        """
-        [turn_number, current_nation, phase_id, vp_0..vp_N-1, pop_0..pop_N-1, tile_0_nation_0_count .. tile_T-1_nation_N-1_count]
-        """
-        vec = [
-            self.state.turn_number,
-            self.state.current_nation,
-            self.state.phase.value,
-        ]
-        for n in range(self.num_nations):
-            vec.append(self.state.vp_scores.get(n, 0))
-        for n in range(self.num_nations):
-            vec.append(self.state.pop_points.get(n, 0))
-        for t in range(self.num_tiles):
-            counts = [0] * self.num_nations
-            for u in self.state.units.values():
-                if u.alive and u.tile == t:
-                    counts[u.nation] += 1
-            vec.extend(counts)
-        return np.array(vec, dtype=np.float32)
-
-    @property
-    def obs_size(self) -> int:
-        return 3 + 2 * self.num_nations + self.num_tiles * self.num_nations
 
     # -------------------------
     # Serialization helpers
