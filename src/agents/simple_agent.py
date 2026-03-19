@@ -18,8 +18,10 @@ class SimpleAgent:
     ) -> tuple[Action, torch.Tensor, torch.Tensor]:
         state: GameState = env.state
 
-        tile_idxs, terrain_types = self._build_tile_tensors(env)
-        nation_idxs, piece_tile_idxs, unit_id_to_index = self._build_unit_tensors(state)
+        tile_idxs, terrain_types, tile_id_to_index = self._build_tile_tensors(env)
+        nation_idxs, piece_tile_idxs, movement_pts, unit_id_to_index = (
+            self._build_unit_tensors(state)
+        )
         active_nation = torch.tensor(
             state.current_nation, dtype=torch.long, device=self.device
         )
@@ -30,6 +32,7 @@ class SimpleAgent:
             terrain_types,
             nation_idxs,
             piece_tile_idxs,
+            movement_pts,
             active_nation,
             phase_id,
         )
@@ -37,7 +40,12 @@ class SimpleAgent:
         # --- Score actions ---
         legal_actions = env.legal_actions()
         action_logits = self._score_actions(
-            legal_actions, state_emb, tile_embs, unit_embs, unit_id_to_index
+            legal_actions,
+            state_emb,
+            tile_embs,
+            unit_embs,
+            unit_id_to_index,
+            tile_id_to_index,
         )
 
         # --- Sample action ---
@@ -55,22 +63,20 @@ class SimpleAgent:
     def _build_tile_tensors(
         self, env: SimpleHispaniaEnv
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        tile_idxs = torch.arange(env.num_tiles, device=self.device)
+        tile_ids = list(env.tiles.keys())  # Safety for tile id creation in preset.
+        tile_id_to_index = {tid: i for i, tid in enumerate(tile_ids)}
+        tile_idxs = torch.tensor(tile_ids, dtype=torch.long, device=self.device)
         terrain_types = torch.tensor(
-            [env.tiles[i].terrain.value for i in range(env.num_tiles)],
+            [env.tiles[tid].terrain.value for tid in tile_ids],
             dtype=torch.long,
             device=self.device,
         )
-        return tile_idxs, terrain_types
+        return tile_idxs, terrain_types, tile_id_to_index
 
     def _build_unit_tensors(
         self, state: GameState
     ) -> tuple[torch.Tensor, torch.Tensor, Dict[int, int]]:
-        units: list[Unit] = [
-            u
-            for u in state.units.values()
-            if u.alive and u.nation == state.current_nation and u.movement_points > 0
-        ]
+        units: list[Unit] = [u for u in state.units.values() if u.alive]
         if units:
             nation_idxs = torch.tensor(
                 [u.nation for u in units], dtype=torch.long, device=self.device
@@ -78,13 +84,19 @@ class SimpleAgent:
             piece_tile_idxs = torch.tensor(
                 [u.tile for u in units], dtype=torch.long, device=self.device
             )
+            movement_pts = torch.tensor(
+                [u.movement_points for u in units],
+                dtype=torch.float,
+                device=self.device,
+            )
             unit_id_to_index: Dict[int, int] = {u.id: i for i, u in enumerate(units)}
         else:
             nation_idxs = torch.empty(0, dtype=torch.long, device=self.device)
             piece_tile_idxs = torch.empty(0, dtype=torch.long, device=self.device)
+            movement_pts = torch.empty(0, dtype=torch.float, device=self.device)
             unit_id_to_index = {}
 
-        return nation_idxs, piece_tile_idxs, unit_id_to_index
+        return nation_idxs, piece_tile_idxs, movement_pts, unit_id_to_index
 
     def _score_actions(
         self,
@@ -93,33 +105,41 @@ class SimpleAgent:
         tile_embs: torch.Tensor,
         unit_embs: torch.Tensor,
         unit_id_to_index: dict[int, int],
+        tile_id_to_index: dict[int, int],
     ) -> torch.Tensor:
         logits: list[torch.Tensor] = []
 
         for action in legal_actions:
+            action_type = torch.tensor(action.type.value, device=self.device)
             match action.type:
-                case ActionType.END_PHASE | ActionType.END_TURN:
-                    action_type = torch.tensor(0, device=self.device)
+                case ActionType.END_PHASE:
                     logit = self.model.encode_action(action_type, state_emb, None, None)
 
                 case ActionType.BUY_UNIT:
-                    action_type = torch.tensor(1, device=self.device)
+                    idx = tile_id_to_index[action.target_tile]
                     logit = self.model.encode_action(
-                        action_type, state_emb, tile_embs[action.target_tile], None
+                        action_type, state_emb, tile_embs[idx], None
                     )
 
                 case ActionType.MOVE_UNIT:
-                    action_type = torch.tensor(2, device=self.device)
                     idx = unit_id_to_index.get(action.unit_id)
+                    tile_idx = tile_id_to_index[action.target_tile]
                     unit_emb = (
                         unit_embs[idx]
                         if idx is not None
                         else torch.zeros_like(state_emb)
                     )
                     logit = self.model.encode_action(
-                        action_type, state_emb, tile_embs[action.target_tile], unit_emb
+                        action_type, state_emb, tile_embs[tile_idx], unit_emb
                     )
-
+                case ActionType.RESOLVE_BATTLE:
+                    idx = tile_id_to_index[action.target_tile]
+                    logit = self.model.encode_action(
+                        action_type,
+                        state_emb,
+                        tile_embs[idx],
+                        None,
+                    )
                 case _:
                     print(f"Unknown action type: {action.type}")
                     continue
