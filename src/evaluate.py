@@ -9,7 +9,6 @@ def evaluate(
 ):
     """Run evaluation, return summary and game log data."""
     model.eval()
-
     model_agent = SimpleAgent(model, device=device)
     random_agent = RandomAgent()
     agents = [model_agent] + [random_agent] * (env.num_nations - 1)
@@ -20,7 +19,7 @@ def evaluate(
 
     with torch.no_grad():
         for game_idx in range(num_games):
-            env.reset()  # TODO: Care here with seed reset. Reprdocibility errors maybe? (Full deterministic as of now)
+            env.reset()
             game_log = env.to_log_dict()
             done = False
 
@@ -31,7 +30,6 @@ def evaluate(
                 else:
                     action = agent.select_action(env)
                 done, _ = env.step(action)
-
                 game_log["actions"].append(action.to_dict())
 
             game_log["final_state"] = env.state.to_dict()
@@ -40,6 +38,7 @@ def evaluate(
             scores = env.state.vp_scores
             model_score = scores.get(0, 0)
             returns_per_game.append(model_score)
+
             if model_score > max((v for k, v in scores.items() if k != 0), default=0):
                 wins += 1
 

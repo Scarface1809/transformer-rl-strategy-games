@@ -9,11 +9,9 @@ from config import TrainingConfig
 def compute_returns(rewards, gamma):
     R = 0
     returns = []
-
     for r in reversed(rewards):
         R = r + gamma * R
         returns.insert(0, R)
-
     return torch.tensor(returns, dtype=torch.float32)
 
 
@@ -27,19 +25,17 @@ def compute_loss(trajectories, gamma, device, entropy_coef=0.01):
         if not traj["rewards"]:
             continue
 
+        values = torch.stack(traj["values"])
         returns = compute_returns(traj["rewards"], gamma).to(device)
         log_probs = torch.stack(traj["log_probs"])
-        values = torch.stack(traj["values"])
         advantage = returns - values.detach()
 
         std = advantage.std()
         if std > 1e-3:
             advantage = (advantage - advantage.mean()) / (std + 1e-8)
-        else:
-            advantage = advantage - advantage.mean()
 
         policy_losses.append(-(log_probs * advantage).mean())
-        value_losses.append(F.mse_loss(values, returns))
+        value_losses.append(F.mse_loss(values.view(-1), returns))
         entropy_losses.append((-log_probs).mean())
         episode_returns.append(sum(traj["rewards"]))
 
@@ -65,7 +61,7 @@ def train_episodes(
     start_episode: int = 0,
     opponent_model: torch.nn.Module = None,
 ):
-    model.train()  # Safety
+    model.train()
 
     if opponent_model is not None:
         opponent_agent = SimpleAgent(opponent_model, device=device, debug=False)
@@ -101,29 +97,11 @@ def train_episodes(
                         action, _, _ = opponent_agent.select_action(env)
                 done, _ = env.step(action)
 
-        if env.state.done:
-            model_score = env.state.vp_scores.get(0, 0)
-            best_opponent = max(
-                (v for k, v in env.state.vp_scores.items() if k != 0), default=0
-            )
-            vp_diff = model_score - best_opponent
-
-            if vp_diff > 0:
-                terminal_reward = 10.0
-            elif vp_diff == 0:
-                terminal_reward = 0.0
-            else:
-                terminal_reward = -10.0
-
-            if learner_traj["rewards"]:
-                learner_traj["rewards"][-1] += terminal_reward
-
         trajectories = {0: learner_traj}
         loss, avg_ret, max_ret, min_ret = compute_loss(trajectories, cfg.gamma, device)
 
         optimizer.zero_grad()
         loss.backward()
-        # Clip gradient (Prevent big gradient spikes)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
         optimizer.step()
 
