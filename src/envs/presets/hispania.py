@@ -17,12 +17,6 @@ def _make_tile(
     stacking_modifier: int = 0,
     city_eligible: bool = False,
 ) -> Tile:
-    """
-    Convenience constructor.
-
-    `neighbors` is a list of (neighbor_tile_id, EdgeType) pairs.
-    base_stacking defaults to 3 for CLEAR and 2 for MOUNTAIN if not given.
-    """
     if base_stacking is None:
         base_stacking = 2 if terrain == TerrainType.MOUNTAIN else 3
 
@@ -219,30 +213,21 @@ def create_board() -> Dict[int, Tile]:
 
 
 def create_units(
-    tiles: Dict[int, Tile], num_nations: int = 4, units_per_nation: int = 10
+    tiles: Dict[int, Tile], num_nations: int = 1, units_per_nation: int = 10
 ) -> Dict[int, Unit]:
     units: Dict[int, Unit] = {}
     uid = 0
 
-    starting_tiles = {
-        0: [0, 1, 2, 3, 4],
-        1: [15, 16, 17, 18],
-        2: [30, 31, 32, 33],
-        3: [39, 40, 41, 42],
-    }
+    starting_tiles = [0, 1, 2, 3, 4]  # north cluster, nation 0 only
 
-    for nation in range(num_nations):
-        tiles_for_nation = starting_tiles.get(nation, list(tiles.keys()))
-        num_starting = len(tiles_for_nation)
+    base_per_tile = units_per_nation // len(starting_tiles)
+    remainder = units_per_nation % len(starting_tiles)
 
-        base_per_tile = units_per_nation // num_starting
-        remainder = units_per_nation % num_starting
-
-        for i, tile_id in enumerate(tiles_for_nation):
-            count = base_per_tile + (1 if i < remainder else 0)
-            for _ in range(count):
-                units[uid] = Unit(uid, nation, tile_id)
-                uid += 1
+    for i, tile_id in enumerate(starting_tiles):
+        count = base_per_tile + (1 if i < remainder else 0)
+        for _ in range(count):
+            units[uid] = Unit(uid, 0, tile_id)
+            uid += 1
 
     return units
 

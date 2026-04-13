@@ -16,7 +16,7 @@ class SimpleAgent:
     def select_action(
         self, env: SimpleHispaniaEnv
     ) -> tuple[Action, torch.Tensor, torch.Tensor]:
-
+        # Game state
         state: GameState = env.state
 
         # --- Build input tensors for model ---
@@ -64,7 +64,7 @@ class SimpleAgent:
         phase_offset = self.model._num_nations
         global_feats[phase_offset + state.phase.value] = 1.0
 
-        return global_feats.unsqueeze(0)  # (1, global_feat_dim)
+        return global_feats.unsqueeze(0).unsqueeze(1)  # (1, 1, global_feat_dim)
 
     def _build_tile_feats(self, env: SimpleHispaniaEnv):
         # TileId's 0...N-1

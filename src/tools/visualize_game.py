@@ -728,8 +728,7 @@ class GameVisualizer:
         idx = self.current_index - 1
         if idx >= len(self.data.actions):
             return "(no action)"
-        # Action.display_text() already handles all ActionType cases
-        return self.data.actions[idx].display_text()
+        return self.data.actions[idx].__str__()
 
 
 # ============================================================================

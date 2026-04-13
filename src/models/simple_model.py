@@ -14,38 +14,44 @@ class SimpleModel(nn.Module):
         d_model: int = 128,
         nhead: int = 4,
         num_layers: int = 3,
-        dim_feedforward: int = 256,
+        dim_feedforward: int = 512,
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
 
-        # Model dimension
+        # Store config
         self._d = d_model
         self._num_tiles = num_tiles
         self._num_nations = num_nations
 
-        # Channel lenght for each embedding type
-        GLOBAL_CHANNELS = num_nations + len(Phase)  # active nation + phase
-        TILE_CHANNELS = 1 + len(TerrainType)  # tile idx + terrain type
-        UNIT_CHANNELS = num_nations + 1 + 1  # nation + tile idx + movement pts
+        # Input projections
 
-        # Projections to Model Dimension
+        # Global token: one-hot(nation) + one-hot(phase) → Linear
+        GLOBAL_CHANNELS = num_nations + len(Phase)
         self.global_proj = nn.Linear(GLOBAL_CHANNELS, d_model)
+
+        # Tile token: one-hot(tile_id) + one-hot(terrain) → Linear
+        TILE_CHANNELS = num_tiles + len(TerrainType)
         self.tile_proj = nn.Linear(TILE_CHANNELS, d_model)
+
+        # Unit token: one-hot(nation) + one-hot(type) → Linear
+        UNIT_CHANNELS = num_nations + num_tiles + 1
         self.unit_proj = nn.Linear(UNIT_CHANNELS, d_model)
 
-        # Learnable positional bias for all embeddings / tokens
-        # TODO : fOR ALL TOKENS LIKE DIPLODOCUS
+        # Absolute Learnable positional bias for only tiles.
         self.tile_pos_bias = nn.Parameter(torch.zeros(num_tiles, d_model))
 
-        # Transformer encoder
+        # TODO: Relative positional bias for the tile tokens
+
+        # TODO: Absolute and relative positional bias for the unit tokens
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             batch_first=True,
-            norm_first=False,
+            norm_first=True,
         )
         self.transformer = nn.TransformerEncoder(
             encoder_layer,
@@ -53,6 +59,7 @@ class SimpleModel(nn.Module):
         )
 
         # Value head
+        # TODO: Make it return a distribution over all nation valeus instead of just the current nation
         self.value_head = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.GELU(),
@@ -71,39 +78,44 @@ class SimpleModel(nn.Module):
         self, global_feats, tile_feats, unit_feats=None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        global_feats : (B, global_feat_dim)
+        global_feats : (B, 1, global_feat_dim)
         tile_feats   : (B, num_tiles, tile_feat_dim)
         unit_feats   : (B, num_units, unit_feat_dim)  # variable length
         """
-        B = global_feats.size(0)
+        batch_size = global_feats.size(0)
         num_tiles = tile_feats.size(1)
         num_units = unit_feats.size(1) if unit_feats is not None else 0
 
         # Token embeddings
-        global_tok = self.global_proj(global_feats).unsqueeze(1)  # (B,1,MODEL_DIM)
-        tile_toks = self.tile_proj(tile_feats)  # (B,num_tiles,MODEL_DIM)
+        global_tok = self.global_proj(global_feats)  # (B, 1, MODEL_DIM)
+        tile_toks = self.tile_proj(tile_feats)  # (B, num_tiles, MODEL_DIM)
         unit_toks = (
             self.unit_proj(unit_feats)
             if num_units > 0
-            else torch.zeros(B, 0, self._d, device=global_feats.device)
-        )
+            else torch.zeros(batch_size, 0, self._d, device=global_feats.device)
+        )  # (B, num_units, MODEL_DIM) or (B, 0, MODEL_DIM)
 
-        tile_toks = tile_toks + self.tile_pos_bias[:num_tiles, :].unsqueeze(0)
+        # Add positional bias to tile tokens
+        tile_toks += self.tile_pos_bias[:num_tiles, :].unsqueeze(0)
 
-        # Concatenate tokens → (B, seq_len, MODEL_DIM)
+        # Concatenate tokens → (B, 1 + num_tiles + num_units, MODEL_DIM)
         tokens = torch.cat([global_tok, tile_toks, unit_toks], dim=1)
 
         # Transformer
         encoded = self.transformer(tokens)
 
         # Extract embeddings
-        game_emb = encoded[:, 0, :]  # global token
-        tile_embs = encoded[:, 1 : 1 + num_tiles, :]  # tiles
-        unit_embs = encoded[:, 1 + num_tiles :, :]  # units
+        game_emb = encoded[:, 0:1, :]  # global token (B, 1, d_model)
+        tile_embs = encoded[
+            :, 1 : 1 + num_tiles, :
+        ]  # tile tokens (B, num_tiles, d_model)
+        unit_embs = encoded[
+            :, 1 + num_tiles :, :
+        ]  # unit tokens (B, num_units, d_model)
 
         # Value head mean pool over all tokens
-        game_rep = encoded.mean(dim=1)
-        value = self.value_head(game_rep).squeeze(-1)
+        game_rep = encoded.mean(dim=1)  # (B, d_model)
+        value = self.value_head(game_rep)  # (B, 1)
 
         return game_emb, tile_embs, unit_embs, value
 

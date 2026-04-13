@@ -33,6 +33,16 @@ class EdgeType(Enum):
 
 
 # =========================
+# Action types
+# =========================
+class ActionType(Enum):
+    END_PHASE = 0
+    MOVE_UNIT = 1
+    BUY_UNIT = 2
+    RESOLVE_BATTLE = 3
+
+
+# =========================
 # Edge
 # =========================
 @dataclass
@@ -162,18 +172,20 @@ class Unit:
         )
 
 
-class ActionType(Enum):
-    END_PHASE = 0
-    MOVE_UNIT = 1
-    BUY_UNIT = 2
-    RESOLVE_BATTLE = 3
-
-
 @dataclass(frozen=True)
 class Action:
     type: ActionType
     unit_id: int | None = None
     target_tile: int | None = None
+
+    def __str__(self) -> str:
+        if self.type == ActionType.END_PHASE:
+            return "End phase"
+        if self.type == ActionType.BUY_UNIT:
+            return f"Buy unit → T{self.target_tile}"
+        if self.type == ActionType.RESOLVE_BATTLE:
+            return f"Resolve battle → T{self.target_tile}"
+        return f"Move U{self.unit_id} → T{self.target_tile}"
 
     # ── Convenience constructors ─────────────────────────────────────────────
 
@@ -192,17 +204,6 @@ class Action:
     @classmethod
     def resolve_battle(cls, tile_id: int) -> "Action":
         return cls(ActionType.RESOLVE_BATTLE, target_tile=tile_id)
-
-    # ── Helpers ─────────────────────────────────────────────
-
-    def display_text(self) -> str:
-        if self.type == ActionType.END_PHASE:
-            return "End phase"
-        if self.type == ActionType.BUY_UNIT:
-            return f"Buy unit → T{self.target_tile}"
-        if self.type == ActionType.RESOLVE_BATTLE:
-            return f"Resolve battle → T{self.target_tile}"
-        return f"Move U{self.unit_id} → T{self.target_tile}"
 
     # ── Serialization ─────────────────────────────────────────────
 
@@ -228,11 +229,88 @@ class Action:
 class GameState:
     turn_number: int = 0
     current_nation: int = 0
-    done: bool = False
-    vp_scores: Dict[int, int] = field(default_factory=lambda: defaultdict(int))
-    pop_points: Dict[int, int] = field(default_factory=dict)
-    units: Dict[int, Unit] = field(default_factory=dict)
     phase: Phase = Phase.GROWTH
+    done: bool = False
+
+    units: Dict[int, Unit] = field(default_factory=dict)
+    tiles: Dict[int, Tile] = field(default_factory=dict)
+
+    vp_scores: Dict[int, int] = field(default_factory=lambda: defaultdict(int))
+    pop_points: Dict[int, int] = field(default_factory=lambda: defaultdict(int))
+
+    @staticmethod
+    def create(tiles, units):
+        state = GameState(tiles=tiles, units=units)
+
+        n_nations = state.num_nations
+
+        state.vp_scores = {i: 0 for i in range(n_nations)}
+        state.pop_points = {i: 0 for i in range(n_nations)}
+
+        return state
+
+    @property
+    def num_tiles(self) -> int:
+        return len(self.tiles)
+
+    @property
+    def num_nations(self) -> int:
+        return max((u.nation for u in self.units.values()), default=0) + 1
+
+    # ── Queries ─────────────────────────────────────────────
+
+    def units_on_tile(self, tile_id: int, nation: int | None = None):
+        return [
+            u
+            for u in self.units.values()
+            if u.alive and u.tile == tile_id and (nation is None or u.nation == nation)
+        ]
+
+    def count_units_on_tile(self, tile_id: int, nation: int | None = None) -> int:
+        return len(self.units_on_tile(tile_id, nation))
+
+    def units_of_nation(self, nation: int):
+        return [u for u in self.units.values() if u.alive and u.nation == nation]
+
+    def next_unit_id(self) -> int:
+        if self.units:
+            return max(self.units.keys()) + 1
+        else:
+            return 0
+
+    def nation_tiles(self, nation: int) -> set[int]:
+        return {u.tile for u in self.units.values() if u.alive and u.nation == nation}
+
+    def empty_tiles(self) -> set[int]:
+        occupied = {u.tile for u in self.units.values() if u.alive}
+        return set(self.tiles.keys()) - occupied
+
+    def battle_tiles(self, nation: int) -> list[int]:
+        result = set()
+
+        for u in self.units.values():
+            if not u.alive or u.nation != nation:
+                continue
+
+            for v in self.units.values():
+                if v.alive and v.tile == u.tile and v.nation != nation:
+                    result.add(u.tile)
+
+        return list(result)
+
+    def can_stack_unit(self, tile_id: int, nation: int) -> bool:
+        return (
+            self.count_units_on_tile(tile_id, nation)
+            < self.tiles[tile_id].stacking_limit
+        )
+
+    def neighbors(self, tile_id: int) -> list[int]:
+        return list(self.tiles[tile_id].adjacencies.keys())
+
+    def edge_between(self, a: int, b: int) -> Edge | None:
+        return self.tiles[a].adjacencies.get(b)
+
+    # Serialization ─────────────────────────────────────────────
 
     def to_dict(self) -> dict:
         return {
@@ -252,13 +330,11 @@ class GameState:
             current_nation=int(d.get("current_nation", 0)),
             phase=Phase[d.get("phase", "GROWTH")],
             done=bool(d.get("done", False)),
-            vp_scores={int(k): int(v) for k, v in d.get("vp_scores", {}).items()},
-            pop_points={int(k): int(v) for k, v in d.get("pop_points", {}).items()},
+            vp_scores=defaultdict(int, d.get("vp_scores", {})),
+            pop_points=defaultdict(int, d.get("pop_points", {})),
         )
         for ud in d.get("units", {}).values():
             unit = Unit.from_dict(ud)
             state.units[unit.id] = unit
-        for u in state.units.values():
-            state.vp_scores.setdefault(u.nation, 0)
-            state.pop_points.setdefault(u.nation, 0)
+
         return state
