@@ -1,20 +1,31 @@
+from __future__ import annotations
+
 import argparse
+import contextlib
+import io
 import math
+import sys
+import pathlib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
 import pygame
 import pygame.freetype
-import sys, pathlib
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
+from envs.core.entities import Action, GameState
+from envs.core.enums import ActionType, EdgeType, Nation, TerrainType
+from envs.data.rosters import NATION_ROSTERS
+from envs.data.player_nations import PLAYER_NATIONS
+from envs.data.turn_order import TURN_ORDER
 from envs.env import SimpleHispaniaEnv
-from envs.entities import Action, ActionType, EdgeType, TerrainType, GameState
-from pathlib import Path
-from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
+
+# =============================================================================
+# Configuration & Theme
+# =============================================================================
 
 
 @dataclass
@@ -23,7 +34,6 @@ class Config:
     margin: int = 20
     panel_width: int = 340
     node_radius: int = 30
-    map_ratio: float = 0.80
 
 
 @dataclass
@@ -36,10 +46,8 @@ class Theme:
     text_primary: Tuple = (240, 242, 245)
     text_secondary: Tuple = (160, 165, 175)
     text_muted: Tuple = (110, 115, 125)
-
     accent: Tuple = (255, 200, 100)
 
-    # Edge colours keyed by EdgeType
     edge_colors: Dict = field(
         default_factory=lambda: {
             EdgeType.NORMAL: (70, 75, 85),
@@ -48,23 +56,18 @@ class Theme:
             EdgeType.PATH: (180, 130, 60),
         }
     )
-
-    # Tile colours keyed by TerrainType
     tile_colors: Dict = field(
         default_factory=lambda: {
             TerrainType.CLEAR: (220, 220, 220),
             TerrainType.MOUNTAIN: (150, 120, 90),
         }
     )
-
-    nations: List[Tuple] = field(
+    player_primary: List[Tuple[int, int, int]] = field(
         default_factory=lambda: [
-            (235, 64, 52),
-            (52, 152, 219),
-            (46, 204, 113),
-            (241, 196, 15),
-            (155, 89, 182),
-            (230, 126, 34),
+            (52, 152, 219),  # Player 0: blue
+            (241, 196, 15),  # Player 1: yellow
+            (46, 204, 113),  # Player 2: green
+            (235, 64, 52),  # Player 3: red
         ]
     )
 
@@ -77,15 +80,24 @@ class Theme:
     def tile_color(self, terrain: TerrainType) -> Tuple:
         return self.tile_colors.get(terrain, self.tile_colors[TerrainType.CLEAR])
 
+    def nation_color(self, player_id: int, shade_index: int) -> Tuple[int, int, int]:
+        base = self.player_primary[player_id % len(self.player_primary)]
+        # Keep nation variants visually close to the controlling player's primary color.
+        factor = 0.85 if shade_index % 2 == 0 else 1.15
+        return (
+            max(0, min(255, int(base[0] * factor))),
+            max(0, min(255, int(base[1] * factor))),
+            max(0, min(255, int(base[2] * factor))),
+        )
 
-# ============================================================================
-# FONTS
-# ============================================================================
+
+# =============================================================================
+# Fonts
+# =============================================================================
 
 
-def load_fonts():
+def load_fonts(font_path: Path) -> Dict[str, pygame.freetype.Font]:
     pygame.freetype.init()
-    font_path = Path(__file__).parent / "assets/smallest_pixel-7.ttf"
     try:
         if font_path.exists():
             return {
@@ -102,69 +114,13 @@ def load_fonts():
     }
 
 
-# ============================================================================
-# GAME DATA
-# ============================================================================
-
-
-class GameData:
-    def __init__(self, log_path: str):
-        import json
-
-        self.log_path = Path(log_path)
-        with open(self.log_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        # Use Action.from_dict for all actions — no manual type string parsing
-        self.actions: List[Action] = [
-            Action.from_dict(a) for a in data.get("actions", [])
-        ]
-
-        self.preset: str = data.get("preset", "hispania")
-        self.seed = data.get("seed")
-
-        # Replay to get all intermediate GameStates
-        self.states: List[GameState] = self._replay(data)
-
-        if not self.states:
-            raise ValueError("Log has no states to display")
-
-        # Build env once to access tiles (Tile objects with proper TerrainType, adjacencies)
-        env = SimpleHispaniaEnv.from_log(data)
-        self.tiles = env.tiles  # Dict[int, Tile] — real Tile objects, not raw dicts
-        self.num_tiles = len(self.tiles)
-        self.num_nations = data.get("num_nations", len(self.states[0].vp_scores))
-
-        # Verify final state
-        final = data.get("final_state")
-        if final and self.states:
-            replayed_vp = self.states[-1].vp_scores
-            logged_vp = {int(k): int(v) for k, v in final.get("vp_scores", {}).items()}
-            if replayed_vp != logged_vp:
-                print(
-                    "[WARN] Replayed final vp_scores differ from logged final_state — "
-                    "possible seed/logic mismatch."
-                )
-
-    def _replay(self, data: dict) -> List[GameState]:
-        """Reconstruct every GameState by replaying actions from initial_state."""
-        env = SimpleHispaniaEnv.from_log(data)
-        states = [GameState.from_dict(env.state.to_dict())]
-        for action in self.actions:
-            env.step(action)
-            states.append(GameState.from_dict(env.state.to_dict()))
-        return states
-
-    def get_vp_scores(self, state: GameState) -> List[int]:
-        return [state.vp_scores.get(n, 0) for n in range(self.num_nations)]
-
-
-# ============================================================================
-# GRAPH LAYOUT
-# ============================================================================
+# =============================================================================
+# Graph Layout
+# =============================================================================
 
 
 class GraphLayout:
+    # Normalised (x, y) positions for each tile id.
     TILE_POSITIONS: Dict[int, Tuple[float, float]] = {
         0: (0.1834, 0.1807),
         1: (0.1850, 0.2867),
@@ -223,50 +179,106 @@ class GraphLayout:
         54: (0.6749, 0.0815),
     }
 
-    def __init__(self, tile_ids, width, height, node_radius):
+    def __init__(
+        self,
+        tile_ids: List[int],
+        width: int,
+        height: int,
+        node_radius: int,
+    ) -> None:
         self.width = width
         self.height = height
         self.node_radius = node_radius
-        self.positions = {}
-        known_ids = set(self.TILE_POSITIONS.keys())
+        self.positions: Dict[int, Tuple[float, float]] = {}
+
         for tid in tile_ids:
-            if tid in known_ids:
+            if tid in self.TILE_POSITIONS:
                 nx, ny = self.TILE_POSITIONS[tid]
             else:
                 print(f"[WARN] Tile {tid} has no fixed position, using fallback.")
                 angle = (2 * math.pi * tid) / max(len(tile_ids), 1)
                 nx = 0.5 + 0.4 * math.cos(angle)
                 ny = 0.5 + 0.4 * math.sin(angle)
-            self.positions[tid] = [nx * width, ny * height]
+            self.positions[tid] = (nx * width, ny * height)
 
 
-# ============================================================================
-# VISUALIZER
-# ============================================================================
+# =============================================================================
+# Game Data (log loading + replay)
+# =============================================================================
+
+
+class GameData:
+    def __init__(self, log_path: str) -> None:
+        import json
+
+        self.log_path = Path(log_path)
+        with open(self.log_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        self.actions: List[Action] = [
+            Action.from_dict(a) for a in data.get("actions", [])
+        ]
+        self.preset: str = data.get("preset", "hispania")
+        self.seed = data.get("seed")
+        self.states, self.action_logs = self._replay(data)
+
+        if not self.states:
+            raise ValueError("Log has no states to display.")
+
+        # Sanity-check final VP scores.
+        final = data.get("final_state")
+        if final and self.states:
+            replayed_vp = self.states[-1].vp_scores
+            logged_vp = {
+                Nation(int(k)): int(v) for k, v in final.get("vp_scores", {}).items()
+            }
+            if replayed_vp != logged_vp:
+                print(
+                    "[WARN] Replayed final vp_scores differ from logged final_state — "
+                    "possible seed/logic mismatch."
+                )
+
+    def _replay(self, data: dict) -> Tuple[List[GameState], List[str]]:
+        env = SimpleHispaniaEnv.from_log(data, debug=True)
+        states = [GameState.from_dict(env.state.to_dict())]
+        action_logs: List[str] = []
+        for action in self.actions:
+            step_out = io.StringIO()
+            with contextlib.redirect_stdout(step_out):
+                env.step(action)
+            action_logs.append(step_out.getvalue())
+            states.append(GameState.from_dict(env.state.to_dict()))
+        return states, action_logs
+
+
+# =============================================================================
+# Visualizer
+# =============================================================================
 
 
 class GameVisualizer:
-    def __init__(self, game_data: GameData, config: Config):
+    def __init__(self, game_data: GameData, config: Config) -> None:
         self.data = game_data
         self.config = config
         self.theme = Theme()
 
         pygame.init()
 
-        bg_path = Path(__file__).parent / "assets/map.png"
+        asset_dir = Path(__file__).parent / "assets"
+        bg_path = asset_dir / "map.png"
+        font_path = asset_dir / "smallest_pixel-7.ttf"
+
         self.bg_orig: Optional[pygame.Surface] = None
         if bg_path.exists():
-            raw = pygame.image.load(str(bg_path))
-            img_w, img_h = raw.get_size()
+            self.bg_orig = pygame.image.load(str(bg_path))
+            img_w, img_h = self.bg_orig.get_size()
         else:
             print("[INFO] No background image found, using solid colour.")
-            raw = None
             img_w, img_h = 1200, 800
 
-        panel_w = config.panel_width
-        self.win_w = img_w + panel_w
+        self.panel_w = config.panel_width
+        self.win_w = img_w + self.panel_w
         self.win_h = img_h
-        self.panel_w = panel_w
         self.map_w = img_w
         self.map_h = img_h
 
@@ -274,50 +286,54 @@ class GameVisualizer:
         self.screen = pygame.display.set_mode(
             (self.win_w, self.win_h), pygame.RESIZABLE
         )
-
-        if raw is not None:
-            self.bg_orig = raw.convert()
         self.clock = pygame.time.Clock()
-        self.fonts = load_fonts()
+        self.fonts = load_fonts(font_path)
 
+        self._background: Optional[pygame.Surface] = None
         self._rebuild_surfaces()
+
+        self._norm_positions: Dict[int, Tuple[float, float]] = {}
+        self.node_circles: Dict[int, Tuple[int, int, int]] = {}
         self._rebuild_layout()
 
         self.current_index = 0
+        self._last_logged_action_index: Optional[int] = None
+        self.show_population_points = False
         self.running = True
 
-    def _rebuild_surfaces(self):
-        if self.bg_orig:
-            self.background = pygame.transform.scale(
-                self.bg_orig, (self.map_w, self.map_h)
+    # ── Layout helpers ────────────────────────────────────────────────────────
+
+    def _rebuild_surfaces(self) -> None:
+        if self.bg_orig is not None:
+            self._background = self.bg_orig.convert()
+            self._background = pygame.transform.scale(
+                self._background, (self.map_w, self.map_h)
             )
         else:
-            self.background = None
+            self._background = None
 
-    def _rebuild_layout(self):
+    def _rebuild_layout(self) -> None:
         m = self.config.margin
         layout_w = self.map_w - m * 2
         layout_h = self.map_h - m * 2
 
-        print("Calculating graph layout…")
-        self.layout = GraphLayout(
-            list(self.data.tiles.keys()),
+        layout = GraphLayout(
+            list(self.data.states[0].tiles.keys()),
             layout_w,
             layout_h,
             self.config.node_radius,
         )
-
-        self._norm_positions: Dict[int, Tuple[float, float]] = {
+        self._norm_positions = {
             tid: (x / layout_w, y / layout_h)
-            for tid, (x, y) in self.layout.positions.items()
+            for tid, (x, y) in layout.positions.items()
         }
         self._update_node_circles()
 
-    def _update_node_circles(self):
+    def _update_node_circles(self) -> None:
         m = self.config.margin
         layout_w = self.map_w - m * 2
         layout_h = self.map_h - m * 2
-        self.node_circles: Dict[int, Tuple[int, int, int]] = {
+        self.node_circles = {
             tid: (
                 int(m + nx * layout_w),
                 int(m + ny * layout_h),
@@ -326,16 +342,38 @@ class GameVisualizer:
             for tid, (nx, ny) in self._norm_positions.items()
         }
 
-    # ── main loop ─────────────────────────────────────────────────────────────
+    # ── Main loop ─────────────────────────────────────────────────────────────
 
-    def run(self):
+    def run(self) -> None:
         while self.running:
             self._handle_events()
+            self._print_current_action_log()
             self._render()
             self.clock.tick(self.config.fps)
         pygame.quit()
 
-    def _handle_events(self):
+    def _print_current_action_log(self) -> None:
+        if self.current_index == 0:
+            self._last_logged_action_index = None
+            return
+
+        action_idx = self.current_index - 1
+        if action_idx == self._last_logged_action_index:
+            return
+
+        self._last_logged_action_index = action_idx
+        if action_idx < 0 or action_idx >= len(self.data.action_logs):
+            return
+
+        log_text = self.data.action_logs[action_idx].strip()
+        if not log_text:
+            return
+
+        print(f"\n[Action {action_idx}] {self.data.actions[action_idx]}")
+        print(log_text)
+
+    def _handle_events(self) -> None:
+        max_idx = len(self.data.states) - 1
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
@@ -347,11 +385,14 @@ class GameVisualizer:
                 self._rebuild_surfaces()
                 self._update_node_circles()
             elif event.type == pygame.KEYDOWN:
-                max_idx = len(self.data.states) - 1
-                if event.key in (pygame.K_RIGHT, pygame.K_d, pygame.K_SPACE):
+                if event.key in (pygame.K_RIGHT, pygame.K_SPACE):
                     self.current_index = min(max_idx, self.current_index + 1)
-                elif event.key in (pygame.K_LEFT, pygame.K_a, pygame.K_BACKSPACE):
+                elif event.key in (pygame.K_LEFT, pygame.K_BACKSPACE):
                     self.current_index = max(0, self.current_index - 1)
+                elif event.key == pygame.K_d:
+                    self.current_index = min(max_idx, self.current_index + 10)
+                elif event.key == pygame.K_a:
+                    self.current_index = max(0, self.current_index - 10)
                 elif event.key == pygame.K_HOME:
                     self.current_index = 0
                 elif event.key == pygame.K_END:
@@ -360,6 +401,8 @@ class GameVisualizer:
                     self.current_index = max(0, self.current_index - 10)
                 elif event.key == pygame.K_PAGEDOWN:
                     self.current_index = min(max_idx, self.current_index + 10)
+                elif event.key in (pygame.K_t, pygame.K_TAB):
+                    self.show_population_points = not self.show_population_points
                 elif event.key == pygame.K_ESCAPE:
                     self.running = False
 
@@ -370,14 +413,14 @@ class GameVisualizer:
                 return tile_id
         return None
 
-    # ── rendering ─────────────────────────────────────────────────────────────
+    # ── Rendering ─────────────────────────────────────────────────────────────
 
-    def _render(self):
+    def _render(self) -> None:
         state = self.data.states[self.current_index]
         hover_tile = self._get_hover_tile()
 
-        if self.background:
-            self.screen.blit(self.background, (0, 0))
+        if self._background is not None:
+            self.screen.blit(self._background, (0, 0))
         else:
             pygame.draw.rect(
                 self.screen,
@@ -390,6 +433,7 @@ class GameVisualizer:
         self._render_action_arrow()
         self._render_units(state)
 
+        # Divider + panel background.
         pygame.draw.line(
             self.screen,
             self.theme.divider,
@@ -397,7 +441,6 @@ class GameVisualizer:
             (self.map_w, self.win_h),
             3,
         )
-
         pygame.draw.rect(
             self.screen,
             self.theme.bg_panel,
@@ -407,34 +450,36 @@ class GameVisualizer:
 
         pygame.display.flip()
 
-    def _render_edges(self):
-        """Draw each edge once, using EdgeType from Tile.adjacencies directly."""
-        drawn = set()
-        for tile_id, tile in self.data.tiles.items():
+    def _render_edges(self) -> None:
+        drawn: set[Tuple[int, int]] = set()
+        for tile_id, tile in self.data.states[0].tiles.items():
             if tile_id not in self.node_circles:
                 continue
             x1, y1, _ = self.node_circles[tile_id]
             for nb_id, edge in tile.adjacencies.items():
                 if nb_id not in self.node_circles:
                     continue
-                edge_key = tuple(sorted([tile_id, nb_id]))
-                if edge_key in drawn:
+                key = (min(tile_id, nb_id), max(tile_id, nb_id))
+                if key in drawn:
                     continue
-                drawn.add(edge_key)
+                drawn.add(key)
                 x2, y2, _ = self.node_circles[nb_id]
-                # edge.edge_type is an EdgeType enum — use theme helpers directly
-                color = self.theme.edge_color(edge.edge_type)
-                width = self.theme.edge_width(edge.edge_type)
-                pygame.draw.line(self.screen, color, (x1, y1), (x2, y2), width)
+                pygame.draw.line(
+                    self.screen,
+                    self.theme.edge_color(edge.edge_type),
+                    (x1, y1),
+                    (x2, y2),
+                    self.theme.edge_width(edge.edge_type),
+                )
 
-    def _render_nodes(self, state: GameState, hover_tile: Optional[int]):
-        for tile_id, tile in self.data.tiles.items():
+    def _render_nodes(self, state: GameState, hover_tile: Optional[int]) -> None:
+        for tile_id, tile in self.data.states[0].tiles.items():
             if tile_id not in self.node_circles:
                 continue
             x, y, r = self.node_circles[tile_id]
-            # tile.terrain is a TerrainType enum — use theme helper directly
-            color = self.theme.tile_color(tile.terrain)
-            pygame.draw.circle(self.screen, color, (x, y), r)
+            pygame.draw.circle(
+                self.screen, self.theme.tile_color(tile.terrain), (x, y), r
+            )
             pygame.draw.circle(self.screen, self.theme.divider, (x, y), r, 2)
             if tile_id == hover_tile:
                 pygame.draw.circle(self.screen, self.theme.accent, (x, y), r, 4)
@@ -442,31 +487,28 @@ class GameVisualizer:
             tr.center = (x, y - r + 15)
             self.screen.blit(ts, tr)
 
-    def _render_action_arrow(self):
+    def _render_action_arrow(self) -> None:
         if self.current_index == 0:
             return
-        idx = self.current_index - 1
-        if idx >= len(self.data.actions):
+        action_idx = self.current_index - 1
+        if action_idx >= len(self.data.actions):
             return
 
-        action: Action = self.data.actions[idx]
-        # Use ActionType enum directly — no string comparison
+        action = self.data.actions[action_idx]
         if action.type != ActionType.MOVE_UNIT:
             return
+        if action.unit_id is None or action.target_tile is None:
+            return
 
-        end_tile = action.target_tile
         prev_state = self.data.states[self.current_index - 1]
-
-        start_tile = None
         unit = prev_state.units.get(action.unit_id)
-        if unit and unit.alive:
-            start_tile = unit.tile
+        if unit is None or not unit.alive:
+            return
 
-        if (
-            start_tile is None
-            or start_tile not in self.node_circles
-            or end_tile not in self.node_circles
-        ):
+        start_tile = unit.tile
+        end_tile = action.target_tile
+
+        if start_tile not in self.node_circles or end_tile not in self.node_circles:
             return
 
         x1, y1, _ = self.node_circles[start_tile]
@@ -482,12 +524,11 @@ class GameVisualizer:
             self.screen, self.theme.accent, (x2, y2), self.config.node_radius, 4
         )
 
-    def _render_units(self, state: GameState):
+    def _render_units(self, state: GameState) -> None:
         units_by_tile: Dict[int, list] = {}
         for unit in state.units.values():
-            if not unit.alive:
-                continue
-            units_by_tile.setdefault(unit.tile, []).append(unit)
+            if unit.alive:
+                units_by_tile.setdefault(unit.tile, []).append(unit)
 
         for tile_id, units in units_by_tile.items():
             if tile_id not in self.node_circles:
@@ -496,59 +537,79 @@ class GameVisualizer:
             n = len(units)
             unit_r = max(8, int(node_r * 0.25))
 
-            if n == 1:
-                positions = [(cx, cy)]
-            elif n == 2:
-                o = node_r * 0.3
-                positions = [(cx - o, cy), (cx + o, cy)]
-            elif n == 3:
-                o = node_r * 0.28
-                positions = [
-                    (cx - o, cy - o * 0.7),
-                    (cx + o, cy - o * 0.7),
-                    (cx, cy + o * 0.9),
-                ]
-            elif n == 4:
-                o = node_r * 0.28
-                positions = [
-                    (cx - o, cy - o),
-                    (cx + o, cy - o),
-                    (cx - o, cy + o),
-                    (cx + o, cy + o),
-                ]
-            else:
-                r2 = node_r * 0.35
-                positions = [
-                    (
-                        int(cx + r2 * math.cos(2 * math.pi * i / n)),
-                        int(cy + r2 * math.sin(2 * math.pi * i / n)),
-                    )
-                    for i in range(n)
-                ]
+            positions = self._unit_positions(cx, cy, node_r, n)
 
             for unit, (ux, uy) in zip(units, positions):
-                color = self.theme.nations[unit.nation % len(self.theme.nations)]
-                pygame.draw.circle(self.screen, color, (int(ux), int(uy)), unit_r)
-                pygame.draw.circle(
-                    self.screen, (0, 0, 0), (int(ux), int(uy)), unit_r, 2
-                )
+                color = self._nation_color_from_state(state, unit.nation)
+                iux, iuy = int(ux), int(uy)
+                pygame.draw.circle(self.screen, color, (iux, iuy), unit_r)
+                pygame.draw.circle(self.screen, (0, 0, 0), (iux, iuy), unit_r, 2)
                 if unit.nation == state.current_nation:
                     pygame.draw.circle(
-                        self.screen,
-                        self.theme.accent,
-                        (int(ux), int(uy)),
-                        unit_r + 3,
-                        2,
+                        self.screen, self.theme.accent, (iux, iuy), unit_r + 3, 2
                     )
-                ts, tr = self.fonts["small"].render(
-                    str(unit.movement_points), (20, 20, 20)
+                mp = (
+                    unit.current_movement_points
+                    if unit.current_movement_points is not None
+                    else 0
                 )
-                tr.center = (int(ux), int(uy))
+                ts, tr = self.fonts["small"].render(str(mp), (20, 20, 20))
+                tr.center = (iux, iuy)
                 self.screen.blit(ts, tr)
+
+    @staticmethod
+    def _unit_positions(
+        cx: int, cy: int, node_r: int, n: int
+    ) -> List[Tuple[float, float]]:
+        if n == 1:
+            return [(cx, cy)]
+        if n == 2:
+            o = node_r * 0.3
+            return [(cx - o, cy), (cx + o, cy)]
+        if n == 3:
+            o = node_r * 0.28
+            return [(cx - o, cy - o * 0.7), (cx + o, cy - o * 0.7), (cx, cy + o * 0.9)]
+        if n == 4:
+            o = node_r * 0.28
+            return [
+                (cx - o, cy - o),
+                (cx + o, cy - o),
+                (cx - o, cy + o),
+                (cx + o, cy + o),
+            ]
+        r2 = node_r * 0.35
+        return [
+            (
+                cx + r2 * math.cos(2 * math.pi * i / n),
+                cy + r2 * math.sin(2 * math.pi * i / n),
+            )
+            for i in range(n)
+        ]
 
     # ── Panel ─────────────────────────────────────────────────────────────────
 
-    def _render_panel(self, state: GameState, hover_tile: Optional[int]):
+    def _player_for_nation(self, nation: Nation) -> Optional[int]:
+        for player, nations in PLAYER_NATIONS.items():
+            if nation in nations:
+                return player.value
+        return None
+
+    def _nation_shade_index(self, nation: Nation) -> int:
+        for _player, nations in PLAYER_NATIONS.items():
+            if nation in nations:
+                return nations.index(nation)
+        return 0
+
+    def _nation_color_from_state(
+        self, state: GameState, nation: Nation
+    ) -> Tuple[int, int, int]:
+        player_id = self._player_for_nation(nation)
+        if player_id is None:
+            return self.theme.text_muted
+        shade_index = self._nation_shade_index(nation)
+        return self.theme.nation_color(player_id, shade_index)
+
+    def _render_panel(self, state: GameState, hover_tile: Optional[int]) -> None:
         px = self.map_w + 18
         y = 22
 
@@ -570,6 +631,7 @@ class GameVisualizer:
         self.screen.blit(ts, (px, y))
         y += 28
 
+        # Progress bar.
         bar_w = self.panel_w - 36
         bar_h = 12
         pygame.draw.rect(self.screen, self.theme.divider, (px, y, bar_w, bar_h), 2)
@@ -581,32 +643,49 @@ class GameVisualizer:
                 )
         y += 26
 
-        y = self._lv(px, y, "TURN", str(state.turn_number))
+        y = self._label_value(px, y, "TURN", str(state.turn_number))
+        nc = self._nation_color_from_state(state, state.current_nation)
+        y = self._label_value(
+            px,
+            y,
+            "ACTIVE NATION",
+            f"{state.current_nation.name} ({state.current_nation.value})",
+            nc,
+        )
 
-        nc = self.theme.nations[state.current_nation % len(self.theme.nations)]
-        y = self._lv(px, y, "ACTIVE NATION", f"Nation {state.current_nation}", nc)
+        score_label = (
+            "POPULATION POINTS" if self.show_population_points else "VICTORY POINTS"
+        )
+        nation_scores = (
+            state.pop_points if self.show_population_points else state.vp_scores
+        )
 
-        # Victory points — use state.vp_scores directly
-        ts, _ = self.fonts["small"].render("VICTORY POINTS", self.theme.text_secondary)
+        ts, _ = self.fonts["small"].render(score_label, self.theme.text_secondary)
         self.screen.blit(ts, (px, y))
         y += 22
-        for n in range(self.data.num_nations):
-            color = self.theme.nations[n % len(self.theme.nations)]
+        for nation in TURN_ORDER:
+            if nation not in nation_scores:
+                continue
+            player_id = self._player_for_nation(nation)
+            color = self._nation_color_from_state(state, nation)
             dot_x, dot_y = px + 7, y + 7
             pygame.draw.circle(self.screen, color, (dot_x, dot_y), 7)
-            if n == state.current_nation:
+            if nation == state.current_nation:
                 pygame.draw.circle(self.screen, self.theme.accent, (dot_x, dot_y), 9, 2)
+            player_text = (
+                f"Player {player_id}" if player_id is not None else "Unassigned"
+            )
             ts, _ = self.fonts["small"].render(
-                f"Nation {n}: {state.vp_scores.get(n, 0)}", self.theme.text_primary
+                f"{nation.name} ({player_text}): {nation_scores.get(nation, 0)}",
+                self.theme.text_primary,
             )
             self.screen.blit(ts, (px + 22, y))
             y += 22
         y += 12
 
-        # Last action — use Action.display_text() directly
-        y = self._lv(px, y, "LAST ACTION", self._get_action_text())
+        y = self._label_value(px, y, "LAST ACTION", self._action_text())
 
-        # Edge legend — iterate EdgeType enum values
+        # Edge legend.
         pygame.draw.line(
             self.screen,
             self.theme.divider,
@@ -619,8 +698,13 @@ class GameVisualizer:
         self.screen.blit(ts, (px, y))
         y += 20
         for edge_type in EdgeType:
-            color = self.theme.edge_color(edge_type)
-            pygame.draw.line(self.screen, color, (px, y + 8), (px + 20, y + 8), 3)
+            pygame.draw.line(
+                self.screen,
+                self.theme.edge_color(edge_type),
+                (px, y + 8),
+                (px + 20, y + 8),
+                3,
+            )
             ts, _ = self.fonts["small"].render(
                 edge_type.name.capitalize(), self.theme.text_muted
             )
@@ -637,17 +721,35 @@ class GameVisualizer:
         )
         y += 10
 
-        # Hover info — uses Tile object directly
-        if hover_tile is not None:
-            tile = self.data.tiles[hover_tile]
+        # Hover tile info.
+        if hover_tile is not None and hover_tile in self.data.states[0].tiles:
+            tile = self.data.states[0].tiles[hover_tile]
             ts, _ = self.fonts["small"].render("TILE INFO", self.theme.text_secondary)
             self.screen.blit(ts, (px, y))
             y += 20
             ts, _ = self.fonts["normal"].render(
-                f"Tile {hover_tile}  ({tile.terrain.name})", self.theme.text_primary
+                f"T{hover_tile}: {tile.name}", self.theme.text_primary
             )
             self.screen.blit(ts, (px, y))
             y += 28
+
+            ts, _ = self.fonts["small"].render(
+                f"Terrain: {tile.terrain.name}", self.theme.text_primary
+            )
+            self.screen.blit(ts, (px, y))
+            y += 18
+            ts, _ = self.fonts["small"].render(
+                f"Population points: {tile.base_population_points}",
+                self.theme.text_primary,
+            )
+            self.screen.blit(ts, (px, y))
+            y += 18
+            ts, _ = self.fonts["small"].render(
+                f"Stacking: {tile.base_stacking}+{tile.stacking_modifier}",
+                self.theme.text_primary,
+            )
+            self.screen.blit(ts, (px, y))
+            y += 20
 
             if tile.adjacencies:
                 ts, _ = self.fonts["small"].render("Edges:", self.theme.text_secondary)
@@ -661,22 +763,26 @@ class GameVisualizer:
                     self.screen.blit(ts, (px, y))
                     y += 16
 
-            # Units on hover tile — use Unit objects from state directly
             hover_units = [
                 u
                 for u in self.data.states[self.current_index].units.values()
                 if u.alive and u.tile == hover_tile
             ]
+            y += 4
             if hover_units:
-                y += 4
                 ts, _ = self.fonts["small"].render(
                     "Units on tile:", self.theme.text_secondary
                 )
                 self.screen.blit(ts, (px, y))
                 y += 18
                 for unit in hover_units:
+                    mp = (
+                        unit.current_movement_points
+                        if unit.current_movement_points is not None
+                        else 0
+                    )
                     ts, _ = self.fonts["small"].render(
-                        f"  U{unit.id}  N{unit.nation}  MP:{unit.movement_points}",
+                        f"  U{unit.id}  {unit.nation.name}  {unit.stats.type.name}",
                         self.theme.text_primary,
                     )
                     self.screen.blit(ts, (px, y))
@@ -686,17 +792,21 @@ class GameVisualizer:
                 self.screen.blit(ts, (px, y))
                 y += 18
 
-        # Controls
+        # Controls — anchored to bottom of panel.
         controls = [
             ("CONTROLS", self.theme.text_secondary),
-            ("← → / A D", self.theme.text_muted),
-            ("  Navigate states", self.theme.text_muted),
+            ("← / →", self.theme.text_muted),
+            ("  Step -/+ 1 action", self.theme.text_muted),
+            ("A / D", self.theme.text_muted),
+            ("  Jump -/+ 10 actions", self.theme.text_muted),
             ("Space", self.theme.text_muted),
             ("  Next state", self.theme.text_muted),
             ("Home / End", self.theme.text_muted),
             ("  First / Last", self.theme.text_muted),
             ("PgUp / PgDn", self.theme.text_muted),
             ("  ± 10 states", self.theme.text_muted),
+            ("T / Tab", self.theme.text_muted),
+            ("  Toggle VP/Population", self.theme.text_muted),
             ("Esc   Quit", self.theme.text_muted),
         ]
         cy = self.win_h - len(controls) * 18 - 14
@@ -712,9 +822,15 @@ class GameVisualizer:
             self.screen.blit(ts, (px, cy))
             cy += 18
 
-    def _lv(self, x, y, label, value, val_color=None):
-        if val_color is None:
-            val_color = self.theme.text_primary
+    def _label_value(
+        self,
+        x: int,
+        y: int,
+        label: str,
+        value: str,
+        val_color: Optional[Tuple] = None,
+    ) -> int:
+        val_color = val_color or self.theme.text_primary
         ts, _ = self.fonts["small"].render(label, self.theme.text_secondary)
         self.screen.blit(ts, (x, y))
         y += 20
@@ -722,21 +838,51 @@ class GameVisualizer:
         self.screen.blit(ts, (x, y))
         return y + 32
 
-    def _get_action_text(self) -> str:
+    def _action_text(self) -> str:
         if self.current_index == 0:
             return "Game start"
-        idx = self.current_index - 1
-        if idx >= len(self.data.actions):
+        action_idx = self.current_index - 1
+        if action_idx >= len(self.data.actions):
             return "(no action)"
-        return self.data.actions[idx].__str__()
+
+        action = self.data.actions[action_idx]
+        if action.type != ActionType.BUY_UNIT:
+            return str(action)
+
+        prev_state = self.data.states[action_idx]
+        buyer_nation = prev_state.current_nation
+        tile_id = action.target_tile
+        unit_name = action.unit_name or "Unknown"
+
+        tile_name = "Unknown"
+        if tile_id is not None and tile_id in prev_state.tiles:
+            tile_name = prev_state.tiles[tile_id].name
+
+        unit_type = "Unknown"
+        roster = NATION_ROSTERS.get(buyer_nation)
+        if roster is not None and action.unit_name is not None:
+            stats = roster.get(action.unit_name)
+            if stats is not None:
+                unit_type = stats.type.name
+
+        if tile_id is None:
+            return (
+                f"Buy {unit_name} ({unit_type}) by {buyer_nation.name} "
+                "at unknown tile"
+            )
+
+        return (
+            f"Buy {unit_name} ({unit_type}) by {buyer_nation.name} "
+            f"at T{tile_id} ({tile_name})"
+        )
 
 
-# ============================================================================
-# MAIN
-# ============================================================================
+# =============================================================================
+# Entry point
+# =============================================================================
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Visualize game logs with graph-based map"
     )
@@ -746,8 +892,9 @@ def main():
     parser.add_argument("--node-radius", type=int, default=30)
     args = parser.parse_args()
 
-    if not Path(args.log).exists():
-        raise SystemExit(f"Error: Log file not found: {args.log}")
+    log_path = Path(args.log)
+    if not log_path.exists():
+        raise SystemExit(f"Error: log file not found: {args.log}")
 
     try:
         game_data = GameData(args.log)
@@ -763,10 +910,10 @@ def main():
 
     print(f"Loaded : {args.log}")
     print(f"States : {len(game_data.states)}")
-    print(f"Tiles  : {game_data.num_tiles}")
-    print(f"Nations: {game_data.num_nations}")
+    print(f"Tiles  : {len(game_data.states[0].tiles)}")
+    print(f"Nations: {len(game_data.states[0].vp_scores)}")
     print(f"Window : {viz.win_w} × {viz.win_h}")
-    print("\nStarting visualizer…\n")
+    print("\nStarting visualizer…")
 
     viz.run()
 
