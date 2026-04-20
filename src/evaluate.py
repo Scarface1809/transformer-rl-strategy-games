@@ -1,46 +1,68 @@
+from __future__ import annotations
+
 import torch
-from agents.simple_agent import SimpleAgent
+import numpy as np
+
 from agents.random_agent import RandomAgent
+from agents.simple_agent import SimpleAgent
+from envs.data.player_nations import NATION_PLAYER, PLAYER_NATIONS
+from envs.core.enums import Player
 from envs.env import SimpleHispaniaEnv
 
 
 def evaluate(
-    env: SimpleHispaniaEnv, model, num_games: int, device, record_all: bool = False
-):
-    """Run evaluation, return summary and game log data."""
+    env: SimpleHispaniaEnv,
+    model: torch.nn.Module,
+    num_games: int,
+    device: str,
+    record_all: bool = False,
+) -> tuple[dict, list[dict]]:
     model.eval()
-    model_agent = SimpleAgent(model, device=device)
+
+    learner_agent = SimpleAgent(model, device=device)
     random_agent = RandomAgent()
-    agents = [model_agent] + [random_agent] * (env.num_nations - 1)
 
     wins = 0
-    returns_per_game = []
-    all_game_logs = []
+    returns_per_game: list[float] = []
+    all_game_logs: list[dict] = [] if record_all else None
+
+    learner_player = Player.PLAYER_1
 
     with torch.no_grad():
-        for game_idx in range(num_games):
-            env.reset()
-            game_log = env.to_log_dict()
-            done = False
+        for _ in range(num_games):
+            game_seed = int(np.random.randint(0, 1_000_000))
+            env.reset(seed=game_seed)
+            game_log = env.to_log_dict() if record_all else None
 
-            while not done:
-                agent = agents[env.state.current_nation]
-                if isinstance(agent, SimpleAgent):
-                    action, _, _ = agent.select_action(env)
+            while not env.done:
+                nation = env.state.current_nation
+                player = NATION_PLAYER[nation]
+                if player == learner_player:
+                    action, _, _ = learner_agent.select_action(env)
                 else:
-                    action = agent.select_action(env)
-                done, _ = env.step(action)
-                game_log["actions"].append(action.to_dict())
-
-            game_log["final_state"] = env.state.to_dict()
-            all_game_logs.append(game_log)
+                    action = random_agent.select_action(env)
+                env.step(action)
+                if record_all:
+                    game_log["actions"].append(action.to_dict())
 
             scores = env.state.vp_scores
-            model_score = scores.get(0, 0)
-            returns_per_game.append(model_score)
+            player_scores = {
+                p: sum(scores.get(n, 0) for n in PLAYER_NATIONS[p])
+                for p in PLAYER_NATIONS
+            }
+            learner_score = player_scores[learner_player]
 
-            if model_score > max((v for k, v in scores.items() if k != 0), default=0):
+            returns_per_game.append(float(learner_score))
+
+            best_opponent = max(
+                v for p, v in player_scores.items() if p != learner_player
+            )
+
+            if learner_score > best_opponent:
                 wins += 1
+            if record_all:
+                game_log["final_state"] = env.state.to_dict()
+                all_game_logs.append(game_log)
 
     summary = {
         "win_rate": wins / num_games,
@@ -50,5 +72,4 @@ def evaluate(
     }
 
     model.train()
-
-    return summary, (all_game_logs if record_all else {})
+    return summary, (all_game_logs if record_all else [])

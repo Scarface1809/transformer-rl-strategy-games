@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from envs.entities import ActionType, Phase, TerrainType
+from envs.core.entities import ActionType, Phase, TerrainType
 
 
 class SimpleModel(nn.Module):
@@ -12,17 +12,17 @@ class SimpleModel(nn.Module):
         num_tiles: int,
         num_nations: int,
         d_model: int = 128,
-        nhead: int = 4,
-        num_layers: int = 3,
+        n_heads: int = 4,
+        n_layers: int = 3,
         dim_feedforward: int = 512,
         dropout: float = 0.1,
+        device: str = "cpu",
     ) -> None:
         super().__init__()
 
         # Store config
-        self._d = d_model
-        self._num_tiles = num_tiles
-        self._num_nations = num_nations
+        self._d_model = d_model
+        self._device = device
 
         # Input projections
 
@@ -30,12 +30,13 @@ class SimpleModel(nn.Module):
         GLOBAL_CHANNELS = num_nations + len(Phase)
         self.global_proj = nn.Linear(GLOBAL_CHANNELS, d_model)
 
-        # Tile token: one-hot(tile_id) + one-hot(terrain) → Linear
-        TILE_CHANNELS = num_tiles + len(TerrainType)
+        # Tile token: one-hot(tile_id) + one-hot(terrain) + population scalar → Linear
+        TILE_CHANNELS = num_tiles + len(TerrainType) + 1
         self.tile_proj = nn.Linear(TILE_CHANNELS, d_model)
 
-        # Unit token: one-hot(nation) + one-hot(type) → Linear
-        UNIT_CHANNELS = num_nations + num_tiles + 1
+        # Unit token: one-hot(nation) + one-hot(tile) + scalar stats → Linear
+        # Scalars: current_hp, attack, defense, to_kill, movement_points, purchase_price
+        UNIT_CHANNELS = num_nations + num_tiles + 6
         self.unit_proj = nn.Linear(UNIT_CHANNELS, d_model)
 
         # Absolute Learnable positional bias for only tiles.
@@ -47,7 +48,7 @@ class SimpleModel(nn.Module):
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
-            nhead=nhead,
+            nhead=n_heads,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             batch_first=True,
@@ -55,7 +56,7 @@ class SimpleModel(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(
             encoder_layer,
-            num_layers=num_layers,
+            num_layers=n_layers,
         )
 
         # Value head
@@ -68,8 +69,9 @@ class SimpleModel(nn.Module):
 
         # Policy head
         self.action_type_emb = nn.Embedding(len(ActionType), d_model)
+        # TODO: Embeddings for the type of unit basically. for seleciton when buying unit.
         self.policy_head = nn.Sequential(
-            nn.Linear(3 * d_model, d_model),
+            nn.Linear(4 * d_model, d_model),
             nn.GELU(),
             nn.Linear(d_model, 1),
         )
@@ -92,7 +94,7 @@ class SimpleModel(nn.Module):
         unit_toks = (
             self.unit_proj(unit_feats)
             if num_units > 0
-            else torch.zeros(batch_size, 0, self._d, device=global_feats.device)
+            else torch.zeros(batch_size, 0, self._d_model, device=global_feats.device)
         )  # (B, num_units, MODEL_DIM) or (B, 0, MODEL_DIM)
 
         # Add positional bias to tile tokens
@@ -105,7 +107,7 @@ class SimpleModel(nn.Module):
         encoded = self.transformer(tokens)
 
         # Extract embeddings
-        game_emb = encoded[:, 0:1, :]  # global token (B, 1, d_model)
+        game_emb = encoded[:, 0, :]  # global token (B, d_model)
         tile_embs = encoded[
             :, 1 : 1 + num_tiles, :
         ]  # tile tokens (B, num_tiles, d_model)
@@ -126,21 +128,19 @@ class SimpleModel(nn.Module):
         tile_emb: torch.Tensor | None,
         unit_emb: torch.Tensor | None,
     ) -> torch.Tensor:
-
         parts = [
             self.action_type_emb(action_type),
+            game_emb,
             (
                 tile_emb
                 if tile_emb is not None
-                else torch.zeros(self._d, device=self.action_type_emb.weight.device)
+                else torch.zeros(self._d_model, device=self._device)
             ),
             (
                 unit_emb
                 if unit_emb is not None
-                else torch.zeros(self._d, device=self.action_type_emb.weight.device)
+                else torch.zeros(self._d_model, device=self._device)
             ),
         ]
-
         context = torch.cat(parts, dim=-1)
-
         return self.policy_head(context).squeeze(-1)

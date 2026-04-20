@@ -2,7 +2,15 @@ from __future__ import annotations
 from typing import Dict
 import torch
 import torch.nn.functional as F
-from envs.entities import ActionType, Action, GameState, Unit, Phase, TerrainType, Tile
+from envs.core.entities import (
+    ActionType,
+    Action,
+    GameState,
+    Unit,
+    Phase,
+    TerrainType,
+    Tile,
+)
 from envs.env import SimpleHispaniaEnv
 
 
@@ -21,7 +29,7 @@ class SimpleAgent:
 
         # --- Build input tensors for model ---
         global_feats = self._build_global_feats(state)
-        tile_feats, tile_id_to_index = self._build_tile_feats(env)
+        tile_feats = self._build_tile_feats(state)
         unit_feats, unit_id_to_index = self._build_unit_feats(state)
 
         # Frward Pass through model
@@ -36,8 +44,7 @@ class SimpleAgent:
             game_emb.squeeze(0),
             tile_embs.squeeze(0),
             unit_embs.squeeze(0),
-            unit_id_to_index,
-            tile_id_to_index,
+            unit_id_to_index=unit_id_to_index,
         )
 
         # --- Sample action ---
@@ -53,74 +60,93 @@ class SimpleAgent:
         return action, log_prob, value
 
     def _build_global_feats(self, state: GameState) -> torch.Tensor:
-        global_feats = torch.zeros(
-            self.model._num_nations + len(Phase), device=self.device
-        )
+        global_feats = torch.zeros(state.num_nations + len(Phase), device=self.device)
 
         # one-hot active nation
-        global_feats[state.current_nation] = 1.0
+        global_feats[state.current_nation.value] = 1.0
 
         # one-hot phase
-        phase_offset = self.model._num_nations
+        phase_offset = state.num_nations
+
         global_feats[phase_offset + state.phase.value] = 1.0
 
         return global_feats.unsqueeze(0).unsqueeze(1)  # (1, 1, global_feat_dim)
 
-    def _build_tile_feats(self, env: SimpleHispaniaEnv):
+    def _build_tile_feats(self, state: GameState):
         # TileId's 0...N-1
-        tile_ids = sorted(env.tiles.keys())
+        tile_ids = sorted(state.tiles.keys())
+        num_tiles = state.num_tiles
 
         feats = []
         for tid in tile_ids:
-            tile: Tile = env.tiles[tid]
+            tile: Tile = state.tiles[tid]
 
-            feat = torch.zeros(1 + len(TerrainType), device=self.device)
-
+            feat = torch.zeros(num_tiles + len(TerrainType) + 1, device=self.device)
             # One hot encoding for tile id
-            # TODO
-            feat[0] = tid / len(tile_ids)
-
+            feat[tid] = 1.0
             # terrain one-hot
-            feat[1 + tile.terrain.value] = 1.0
-
+            feat[num_tiles + tile.terrain.value] = 1.0
+            # population points scalar
+            feat[num_tiles + len(TerrainType)] = float(tile.base_population_points)
             feats.append(feat)
 
         tile_feats = torch.stack(feats).unsqueeze(0)  # (1, T, C)
-        tile_id_to_index = {tid: i for i, tid in enumerate(tile_ids)}
 
-        return tile_feats, tile_id_to_index
+        return tile_feats
 
     def _build_unit_feats(self, state: GameState):
-        units = [u for u in state.units.values() if u.alive]
+        # Sort units by id to ensure consistent ordering
+        units = sorted([u for u in state.units.values() if u.alive], key=lambda u: u.id)
+        num_nations = state.num_nations
+        num_tiles = state.num_tiles
+        feat_dim = (
+            num_nations + num_tiles + 6
+        )  # nation one-hot + tile one-hot + [hp, atk, def, to_kill, move, cost]
 
-        feats = []
-        unit_id_to_index = {}
-
-        for i, u in enumerate(units):
-            feat = torch.zeros(
-                self.model._num_nations + 2,  # nation + tile + movement
-                device=self.device,
+        if not units:
+            # Return empty tensor with correct shape if no units are alive
+            return torch.zeros(1, 0, feat_dim, device=self.device), torch.zeros(
+                0, dtype=torch.long, device=self.device
             )
 
-            # nation one-hot
-            feat[u.nation] = 1.0
-
-            # tile id one hot vector instead
-            # TODO
-            feat[self.model._num_nations] = u.tile / self.model._num_tiles
-
-            # movement
-            feat[self.model._num_nations + 1] = u.movement_points
-
-            feats.append(feat)
+        max_id = max(u.id for u in units)
+        unit_id_to_index = torch.full(
+            (max_id + 1,), -1, dtype=torch.long, device=self.device
+        )
+        feats = []
+        for i, u in enumerate(units):
             unit_id_to_index[u.id] = i
 
-        if feats:
-            unit_feats = torch.stack(feats).unsqueeze(0)  # (1, U, C)
-        else:
-            unit_feats = torch.zeros(
-                1, 0, self.model._num_nations + 2, device=self.device
+            feat = torch.zeros(
+                feat_dim,
+                device=self.device,
             )
+            # nation one-hot
+            feat[u.nation.value] = 1.0
+            # tile one hot
+            feat[num_nations + u.tile] = 1.0
+            scalar_offset = num_nations + num_tiles
+            # current hit points scalar
+            feat[scalar_offset] = float(u.current_hit_points)
+            # attack scalar
+            feat[scalar_offset + 1] = float(u.stats.attack)
+            # defense scalar
+            feat[scalar_offset + 2] = float(u.stats.defense)
+            # to-kill scalar
+            feat[scalar_offset + 3] = float(u.stats.to_kill)
+            # movement points scalar
+            feat[scalar_offset + 4] = float(
+                u.current_movement_points
+                if u.current_movement_points is not None
+                else 0
+            )
+            # purchase price scalar
+            feat[scalar_offset + 5] = float(
+                u.stats.cost if u.stats.cost is not None else 0
+            )
+            feats.append(feat)
+
+        unit_feats = torch.stack(feats).unsqueeze(0)  # (1, U, C)
 
         return unit_feats, unit_id_to_index
 
@@ -130,46 +156,33 @@ class SimpleAgent:
         game_emb: torch.Tensor,
         tile_embs: torch.Tensor,
         unit_embs: torch.Tensor,
-        unit_id_to_index: dict[int, int],
-        tile_id_to_index: dict[int, int],
+        unit_id_to_index: torch.Tensor,
     ) -> torch.Tensor:
         logits: list[torch.Tensor] = []
 
         for action in legal_actions:
             action_type = torch.tensor(action.type.value, device=self.device)
-            match action.type:
-                case ActionType.END_PHASE:
-                    logit = self.model.encode_action(action_type, game_emb, None, None)
 
-                case ActionType.BUY_UNIT:
-                    idx = tile_id_to_index[action.target_tile]
-                    logit = self.model.encode_action(
-                        action_type, game_emb, tile_embs[idx], None
-                    )
+            tile_emb = (
+                tile_embs[action.target_tile]
+                if action.target_tile is not None
+                else None
+            )
 
-                case ActionType.MOVE_UNIT:
-                    idx = unit_id_to_index.get(action.unit_id)
-                    tile_idx = tile_id_to_index[action.target_tile]
-                    unit_emb = (
-                        unit_embs[idx]
-                        if idx is not None
-                        else torch.zeros_like(game_emb)
-                    )
-                    logit = self.model.encode_action(
-                        action_type, game_emb, tile_embs[tile_idx], unit_emb
-                    )
-                case ActionType.RESOLVE_BATTLE:
-                    idx = tile_id_to_index[action.target_tile]
-                    logit = self.model.encode_action(
-                        action_type,
-                        game_emb,
-                        tile_embs[idx],
-                        None,
-                    )
-                case _:
-                    print(f"Unknown action type: {action.type}")
-                    continue
+            unit_emb = None
+            if action.unit_id is not None:
+                uid = action.unit_id
+                if uid < len(unit_id_to_index):
+                    idx = unit_id_to_index[uid]
+                    if idx >= 0:
+                        unit_emb = unit_embs[idx]
 
-            logits.append(logit)
-
+            logits.append(
+                self.model.encode_action(
+                    action_type,
+                    game_emb,
+                    tile_emb,
+                    unit_emb,
+                )
+            )
         return torch.stack(logits)
