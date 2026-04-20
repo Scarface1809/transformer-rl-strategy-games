@@ -15,7 +15,12 @@ TILES = {
     1: {
         "name": "Oporto",
         "terrain": TerrainType.CLEAR,
-        "neighbors": [(0, EdgeType.RIVER), (14, EdgeType.NORMAL), (15, EdgeType.RIVER)],
+        "neighbors": [
+            (0, EdgeType.RIVER),
+            (2, EdgeType.NORMAL),
+            (14, EdgeType.NORMAL),
+            (15, EdgeType.RIVER),
+        ],
         "base_population_points": 2,
         "base_stacking": 3,
         "stacking_modifier": 0,
