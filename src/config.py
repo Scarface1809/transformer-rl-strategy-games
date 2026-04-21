@@ -1,17 +1,21 @@
 from dataclasses import dataclass, field
 
+
 # --- Environment ---
 @dataclass
 class EnvConfig:
     preset: str = "hispania"  # board: "hispania"
 
+
 # --- Model ---
 @dataclass
 class ModelConfig:
-    model_type: str = "simple"  # "simple" or "transformer"
-    d_model: int = 64
+    model_type: str = "simple"
+    d_model: int = 128
     n_heads: int = 4
-    n_layers: int = 2
+    n_layers: int = 3
+    dropout: float = 0.1
+
 
 # --- Training ---
 @dataclass
@@ -21,11 +25,13 @@ class TrainingConfig:
     lr: float = 1e-3
     debug: bool = True
 
+
 @dataclass
 class EvaluateConfig:
-    num_games: int = 10
+    num_games: int = 25
     frequency: int = 100  # Evaluate every *frequency* training games
     debug: bool = True
+
 
 @dataclass
 class Config:
