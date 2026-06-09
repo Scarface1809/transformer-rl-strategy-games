@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 import os
 import time
@@ -14,7 +13,6 @@ from evaluate import evaluate
 from models.simple_model import SimpleModel
 from plotting import plot_eval_history
 from train import train_episodes
-
 
 # =============================================================================
 # Builders
@@ -84,7 +82,7 @@ def main() -> None:
     eval_history: list[dict] = []
     trained = 0
     total = cfg.training.num_games
-    opponent_model: torch.nn.Module | None = None
+    all_game_logs: list[dict] = []
 
     def _record_eval(episode: int, summary: dict) -> None:
         eval_history.append(
@@ -121,14 +119,8 @@ def main() -> None:
             device,
             num_episodes=batch,
             start_episode=trained,
-            opponent_model=opponent_model,
         )
         trained += batch
-
-        opponent_model = copy.deepcopy(model)
-        opponent_model.eval()
-        for p in opponent_model.parameters():
-            p.requires_grad_(False)
 
         is_final_eval = trained >= total
 
@@ -154,9 +146,49 @@ def main() -> None:
     if all_game_logs:
         save_eval_games(all_game_logs)
 
+    # Save trained model
+    os.makedirs("checkpoints", exist_ok=True)
+    preset = cfg.env.preset
+    model_path = f"checkpoints/model_{preset}_ep{trained}.pt"
+    torch.save(
+        {
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "config": {
+                "num_tiles": env.state.num_tiles,
+                "num_nations": env.state.num_nations,
+                "d_model": cfg.model.d_model,
+                "n_heads": cfg.model.n_heads,
+                "n_layers": cfg.model.n_layers,
+                "dropout": cfg.model.dropout,
+            },
+            "episode": trained,
+        },
+        model_path,
+    )
+    print(f"Saved model checkpoint to {model_path}")
+
     elapsed = time.time() - start_time
     print(f"\nTotal runtime: {elapsed:.2f}s")
 
 
 if __name__ == "__main__":
     main()
+
+
+# Verificar a autoregressividade das policy heads, para ter a certeza q a proxima ação é condicionada na anterior.
+
+# Total de parametros na rede. Calcular
+
+# Treinar mais tempo.
+
+# Input e output do modelo.
+
+# FOr bigger maps the 0 is too often so it collapses the model quickly in sme episodes
+
+# TODO: Train from the checkpoint. load the grpah to continue and the model checkpoint both graphs
+
+# Pequena reward negativa por moves desnecesssarias.
+# OU mudar a delayed reward para dar metade à ultima ação do turno e a outra metade dividr pelas outras ações.
+
+# Discunted rewards de end phase para tras contribui mais as ultimas, iniciais contribui menos.

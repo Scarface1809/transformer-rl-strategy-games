@@ -5,7 +5,7 @@ import numpy as np
 
 from agents.random_agent import RandomAgent
 from agents.simple_agent import SimpleAgent
-from envs.data.player_nations import NATION_PLAYER, PLAYER_NATIONS
+from envs.core.entities import GameLog, Action
 from envs.core.enums import Player
 from envs.env import SimpleHispaniaEnv
 
@@ -28,41 +28,61 @@ def evaluate(
 
     learner_player = Player.PLAYER_1
 
+    # Build nation_to_player mapping from preset config
+    nation_to_player = {
+        n: p for p, nations in env.config.player_nations.items() for n in nations
+    }
+
     with torch.no_grad():
         for _ in range(num_games):
             game_seed = int(np.random.randint(0, 1_000_000))
             env.reset(seed=game_seed)
-            game_log = env.to_log_dict() if record_all else None
+            game_log = (
+                GameLog(
+                    preset=env.preset_name,
+                    seed=env.seed,
+                    max_turns=env.config.max_turns,
+                    initial_state=env.state.to_dict(),
+                    states=[env.state.to_dict()],
+                )
+                if record_all
+                else None
+            )
 
             while not env.done:
                 nation = env.state.current_nation
-                player = NATION_PLAYER[nation]
+                # Skip global phases (no current nation, no actions taken)
+                if nation is None:
+                    env.step(Action.end_phase())
+                    if record_all:
+                        game_log.states.append(env.state.to_dict())
+                    continue
+
+                player = nation_to_player[nation]
                 if player == learner_player:
-                    action, _, _ = learner_agent.select_action(env)
+                    action, *_ = learner_agent.select_action(env)
                 else:
                     action = random_agent.select_action(env)
                 env.step(action)
                 if record_all:
-                    game_log["actions"].append(action.to_dict())
+                    game_log.actions.append(action.to_dict())
+                    game_log.states.append(env.state.to_dict())
 
             scores = env.state.vp_scores
             player_scores = {
-                p: sum(scores.get(n, 0) for n in PLAYER_NATIONS[p])
-                for p in PLAYER_NATIONS
+                p: sum(scores.get(n, 0) for n in env.config.player_nations[p])
+                for p in env.config.player_nations
             }
             learner_score = player_scores[learner_player]
 
             returns_per_game.append(float(learner_score))
 
-            best_opponent = max(
-                v for p, v in player_scores.items() if p != learner_player
-            )
-
-            if learner_score > best_opponent:
+            # Win if learner has the highest score
+            if learner_score >= max(player_scores.values()):
                 wins += 1
             if record_all:
-                game_log["final_state"] = env.state.to_dict()
-                all_game_logs.append(game_log)
+                game_log.final_state = env.state.to_dict()
+                all_game_logs.append(game_log.to_dict())
 
     summary = {
         "win_rate": wins / num_games,

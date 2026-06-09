@@ -12,16 +12,15 @@ from typing import Dict, List, Optional, Tuple
 
 import pygame
 import pygame.freetype
+import torch
 
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
-
-from envs.core.entities import Action, GameState
+from envs.core.entities import Action, GameLog, GameState
 from envs.core.enums import ActionType, EdgeType, Nation, TerrainType
-from envs.data.rosters import NATION_ROSTERS
-from envs.data.player_nations import PLAYER_NATIONS
-from envs.data.turn_order import TURN_ORDER
 from envs.env import SimpleHispaniaEnv
-
+from envs.presets.registry import get_preset
+from agents.simple_agent import SimpleAgent
+from models.simple_model import SimpleModel
 
 # =============================================================================
 # Configuration & Theme
@@ -120,71 +119,14 @@ def load_fonts(font_path: Path) -> Dict[str, pygame.freetype.Font]:
 
 
 class GraphLayout:
-    # Normalised (x, y) positions for each tile id.
-    TILE_POSITIONS: Dict[int, Tuple[float, float]] = {
-        0: (0.1834, 0.1807),
-        1: (0.1850, 0.2867),
-        2: (0.2737, 0.1556),
-        3: (0.4050, 0.1622),
-        4: (0.5250, 0.1770),
-        5: (0.6086, 0.2178),
-        6: (0.6678, 0.1822),
-        7: (0.7510, 0.2022),
-        8: (0.6827, 0.2667),
-        9: (0.6157, 0.3252),
-        10: (0.5462, 0.2556),
-        11: (0.4525, 0.2526),
-        12: (0.3758, 0.2615),
-        13: (0.3166, 0.2311),
-        14: (0.2568, 0.2926),
-        15: (0.1756, 0.3833),
-        16: (0.5501, 0.4344),
-        17: (0.3121, 0.3559),
-        18: (0.3979, 0.3500),
-        19: (0.5098, 0.3256),
-        20: (0.4722, 0.4019),
-        21: (0.3940, 0.4307),
-        22: (0.3056, 0.4396),
-        23: (0.4486, 0.5011),
-        24: (0.3075, 0.5130),
-        25: (0.2256, 0.4381),
-        26: (0.1203, 0.4841),
-        27: (0.2627, 0.5900),
-        28: (0.1788, 0.5478),
-        29: (0.1541, 0.6626),
-        30: (0.2523, 0.6819),
-        31: (0.3505, 0.6130),
-        32: (0.4454, 0.6026),
-        33: (0.4317, 0.6744),
-        34: (0.3427, 0.7107),
-        35: (0.3082, 0.7781),
-        36: (0.3966, 0.7730),
-        37: (0.5228, 0.7263),
-        38: (0.3251, 0.8900),
-        39: (0.5702, 0.6378),
-        40: (0.6463, 0.5793),
-        41: (0.5163, 0.5496),
-        42: (0.6079, 0.5104),
-        43: (0.6112, 0.3993),
-        44: (0.6697, 0.4481),
-        45: (0.7055, 0.3737),
-        46: (0.7711, 0.3367),
-        47: (0.7633, 0.2704),
-        48: (0.8498, 0.2904),
-        49: (0.7841, 0.5619),
-        50: (0.8784, 0.4981),
-        51: (0.9740, 0.4678),
-        52: (0.4486, 0.9611),
-        53: (0.8420, 0.0867),
-        54: (0.6749, 0.0815),
-    }
-
+    # Tile positions are now loaded from preset configuration
     def __init__(
         self,
         tile_ids: List[int],
         width: int,
         height: int,
         node_radius: int,
+        tile_positions: Dict[int, Tuple[float, float]],
     ) -> None:
         self.width = width
         self.height = height
@@ -192,10 +134,10 @@ class GraphLayout:
         self.positions: Dict[int, Tuple[float, float]] = {}
 
         for tid in tile_ids:
-            if tid in self.TILE_POSITIONS:
-                nx, ny = self.TILE_POSITIONS[tid]
+            if tid in tile_positions:
+                nx, ny = tile_positions[tid]
             else:
-                print(f"[WARN] Tile {tid} has no fixed position, using fallback.")
+                print(f"[WARN] Tile {tid} has no position in preset, using fallback.")
                 angle = (2 * math.pi * tid) / max(len(tile_ids), 1)
                 nx = 0.5 + 0.4 * math.cos(angle)
                 ny = 0.5 + 0.4 * math.sin(angle)
@@ -215,18 +157,36 @@ class GameData:
         with open(self.log_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        self.actions: List[Action] = [
-            Action.from_dict(a) for a in data.get("actions", [])
-        ]
-        self.preset: str = data.get("preset", "hispania")
-        self.seed = data.get("seed")
-        self.states, self.action_logs = self._replay(data)
+        self.log = GameLog.from_dict(data)
+        self.actions: List[Action] = [Action.from_dict(a) for a in self.log.actions]
+        self.preset: str = self.log.preset
+        self.seed = self.log.seed
+
+        # Load preset configuration
+        self.preset_config = get_preset(self.preset)
+
+        if self.log.states:
+            self.states = [GameState.from_dict(state) for state in self.log.states]
+            self.action_logs = list(self.log.action_logs)
+            # Reconstruct rewards by replaying actions on a fresh env built from the log.
+            try:
+                env = SimpleHispaniaEnv.from_log(data, debug=False)
+                self.rewards = []
+                for action in self.actions:
+                    _, rewards = env.step(action)
+                    # normalize to map of Nation -> float
+                    self.rewards.append({n: float(v) for n, v in rewards.items()})
+            except Exception:
+                # If replay fails, leave rewards empty but don't crash visualizer
+                self.rewards = []
+        else:
+            self.states, self.action_logs = self._replay(data)
 
         if not self.states:
             raise ValueError("Log has no states to display.")
 
         # Sanity-check final VP scores.
-        final = data.get("final_state")
+        final = self.log.final_state
         if final and self.states:
             replayed_vp = self.states[-1].vp_scores
             logged_vp = {
@@ -248,7 +208,69 @@ class GameData:
                 env.step(action)
             action_logs.append(step_out.getvalue())
             states.append(GameState.from_dict(env.state.to_dict()))
+
+        self._compare_final_state(data, states)
         return states, action_logs
+
+    def _compare_final_state(self, data: dict, states: List) -> None:
+        final = data.get("final_state")
+        if not final or not states:
+            return
+
+        replayed = states[-1]
+        logged_vp = {
+            Nation(int(k)): int(v) for k, v in final.get("vp_scores", {}).items()
+        }
+        logged_pop = {
+            Nation(int(k)): int(v) for k, v in final.get("pop_points", {}).items()
+        }
+
+        mismatches: list[str] = []
+
+        # VP scores
+        for nation, logged_val in logged_vp.items():
+            replayed_val = replayed.vp_scores.get(nation, 0)
+            if replayed_val != logged_val:
+                mismatches.append(
+                    f"  VP {nation.name}: logged={logged_val} replayed={replayed_val}"
+                )
+
+        # Population points
+        for nation, logged_val in logged_pop.items():
+            replayed_val = replayed.pop_points.get(nation, 0)
+            if replayed_val != logged_val:
+                mismatches.append(
+                    f"  Pop {nation.name}: logged={logged_val} replayed={replayed_val}"
+                )
+
+        # Unit-level comparison
+        logged_units = {int(uid): u for uid, u in final.get("units", {}).items()}
+        for uid, logged_u in logged_units.items():
+            replayed_u = replayed.units.get(uid)
+            if replayed_u is None:
+                mismatches.append(f"  Unit {uid}: missing in replay")
+                continue
+            if replayed_u.alive != logged_u.get("alive"):
+                mismatches.append(
+                    f"  Unit {uid} ({replayed_u.nation.name}) alive: "
+                    f"logged={logged_u.get('alive')} replayed={replayed_u.alive}"
+                )
+            if replayed_u.tile != logged_u.get("tile"):
+                mismatches.append(
+                    f"  Unit {uid} tile: logged={logged_u.get('tile')} replayed={replayed_u.tile}"
+                )
+            if replayed_u.current_hit_points != logged_u.get("current_hit_points"):
+                mismatches.append(
+                    f"  Unit {uid} HP: logged={logged_u.get('current_hit_points')} "
+                    f"replayed={replayed_u.current_hit_points}"
+                )
+
+        if mismatches:
+            print("[WARN] Replayed final state differs from logged final state:")
+            for m in mismatches:
+                print(m)
+        else:
+            print("[OK] Replayed final state matches logged final state exactly.")
 
 
 # =============================================================================
@@ -257,10 +279,14 @@ class GameData:
 
 
 class GameVisualizer:
-    def __init__(self, game_data: GameData, config: Config) -> None:
+    def __init__(
+        self, game_data: GameData, config: Config, agent: Optional[SimpleAgent] = None
+    ) -> None:
         self.data = game_data
         self.config = config
         self.theme = Theme()
+        self.agent = agent
+        self.device = "cpu"
 
         pygame.init()
 
@@ -298,6 +324,7 @@ class GameVisualizer:
 
         self.current_index = 0
         self._last_logged_action_index: Optional[int] = None
+        self._last_logged_value_index: Optional[int] = None
         self.show_population_points = False
         self.running = True
 
@@ -322,6 +349,7 @@ class GameVisualizer:
             layout_w,
             layout_h,
             self.config.node_radius,
+            self.data.preset_config.tile_positions,
         )
         self._norm_positions = {
             tid: (x / layout_w, y / layout_h)
@@ -355,6 +383,7 @@ class GameVisualizer:
     def _print_current_action_log(self) -> None:
         if self.current_index == 0:
             self._last_logged_action_index = None
+            self._last_logged_value_index = None
             return
 
         action_idx = self.current_index - 1
@@ -362,15 +391,293 @@ class GameVisualizer:
             return
 
         self._last_logged_action_index = action_idx
-        if action_idx < 0 or action_idx >= len(self.data.action_logs):
+        if action_idx < 0 or action_idx >= len(self.data.actions):
             return
 
-        log_text = self.data.action_logs[action_idx].strip()
-        if not log_text:
+        action_label = str(self.data.actions[action_idx])
+        # print(f"\n[Action {action_idx}] {action_label}")
+        if action_idx < len(self.data.action_logs):
+            log_text = self.data.action_logs[action_idx].strip()
+            if log_text:
+                print(log_text)
+
+        # Print rewards for this action (if available)
+        if hasattr(self.data, "rewards") and action_idx < len(self.data.rewards):
+            r = self.data.rewards[action_idx]
+            if r:
+                rewards_str = ", ".join(f"{n.name}: {v:+.2f}" for n, v in r.items())
+                print(f"[Action {action_idx}] REWARDS: {rewards_str}")
+
+        # Print value head output if model is available
+        if self.agent is not None:
+            self._print_model_head_outputs()
+
+    def _build_policy_masks(self, state: GameState) -> dict[str, torch.Tensor]:
+        """Build the same legality masks the agent uses when sampling actions."""
+        env = SimpleHispaniaEnv(
+            preset=self.data.preset, seed=self.data.seed, debug=False
+        )
+        env.state = state
+
+        unit_feats, unit_id_to_index, index_to_unit_id = self.agent._build_unit_feats(
+            state
+        )
+        num_tiles = state.num_tiles
+        num_units = unit_feats.size(1) if unit_feats is not None else 0
+
+        masks: dict[str, torch.Tensor] = {}
+        masks["action_type"] = env.get_action_type_mask(self.device).unsqueeze(0)
+
+        if num_units > 0:
+            masks["unit"] = env.get_unit_mask_for_move(
+                unit_id_to_index, num_units, self.device
+            ).unsqueeze(0)
+        else:
+            masks["unit"] = torch.full((1, 0), float("-inf"), device=self.device)
+
+        masks["unit_type"] = env.get_unit_type_mask(self.device).unsqueeze(0)
+        masks["tile_buy"] = env.get_tile_mask_for_buy(num_tiles, self.device).unsqueeze(
+            0
+        )
+        masks["tile_battle"] = env.get_tile_mask_for_battle(
+            num_tiles, self.device
+        ).unsqueeze(0)
+
+        if num_units > 0:
+            tile_move_list = []
+            for uid in index_to_unit_id:
+                tile_move_list.append(
+                    env.get_tile_mask_for_move(uid, num_tiles, self.device)
+                )
+            masks["tile_move"] = torch.stack(tile_move_list, dim=0).unsqueeze(0)
+        else:
+            masks["tile_move"] = torch.zeros((1, 0, num_tiles), device=self.device)
+
+        return masks
+
+    def _print_model_head_outputs(self) -> None:
+        """Compute and print value head predictions and all policy head distributions."""
+        if self._last_logged_value_index == self.current_index:
             return
 
-        print(f"\n[Action {action_idx}] {self.data.actions[action_idx]}")
-        print(log_text)
+        self._last_logged_value_index = self.current_index
+
+        try:
+            from envs.core.enums import ActionType
+
+            state = self.data.states[self.current_index]
+
+            # Extract features using agent's methods
+            global_feats = self.agent._build_global_feats(
+                state, max_turns=self.data.preset_config.max_turns
+            )
+            tile_feats = self.agent._build_tile_feats(
+                state, self.data.preset_config.reward_tiles, state.num_nations
+            )
+            unit_feats, unit_id_to_index, index_to_unit_id = (
+                self.agent._build_unit_feats(state)
+            )
+
+            batch_size = global_feats.size(0)
+            num_tiles = tile_feats.size(1)
+            num_units = unit_feats.size(1) if unit_feats is not None else 0
+            masks = self._build_policy_masks(state)
+
+            # Forward pass through transformer to get embeddings
+            with torch.no_grad():
+                # Replicate model's embedding logic
+                global_tok = self.agent.model.global_proj(global_feats)
+                tile_toks = self.agent.model.tile_proj(tile_feats)
+                unit_toks = (
+                    self.agent.model.unit_proj(unit_feats)
+                    if num_units > 0
+                    else torch.zeros(
+                        batch_size,
+                        0,
+                        self.agent.model._d_model,
+                        device=global_feats.device,
+                    )
+                )
+
+                tile_toks += self.agent.model.tile_pos_bias[:num_tiles].unsqueeze(0)
+                tokens = torch.cat([global_tok, tile_toks, unit_toks], dim=1)
+                encoded = self.agent.model.transformer(tokens)
+
+                global_emb = encoded[:, 0, :]  # (B, d_model)
+                tile_embs = encoded[:, 1 : 1 + num_tiles, :]
+                unit_embs = encoded[:, 1 + num_tiles :, :]
+
+                # Get value head output
+                game_rep = encoded.mean(dim=1)
+                value = self.agent.model.value_head(game_rep).squeeze(0)
+
+                # Action type logits, raw and masked.
+                action_type_logits_raw = self.agent.model.action_type_head(
+                    global_emb
+                ).squeeze(0)
+                action_type_logits_masked = action_type_logits_raw + masks[
+                    "action_type"
+                ].squeeze(0)
+                action_probs_raw = torch.softmax(action_type_logits_raw, dim=0)
+                action_probs_masked = torch.softmax(
+                    torch.clamp(action_type_logits_masked, min=-1e8), dim=0
+                )
+
+            # Print value head output
+            print(f"\n[State {self.current_index}] VALUE HEAD OUTPUT:")
+            for nation_idx, nation in enumerate(state.playing_nations):
+                val = value[nation_idx].item()
+                print(f"  {nation.name}: {val:.4f}")
+
+            # Print action type head output.
+            print(f"\n[State {self.current_index}] POLICY HEAD OUTPUT (ACTION TYPE):")
+            action_names = {
+                ActionType.END_PHASE.value: "END_PHASE",
+                ActionType.MOVE_UNIT.value: "MOVE_UNIT",
+                ActionType.BUY_UNIT.value: "BUY_UNIT",
+                ActionType.RESOLVE_BATTLE.value: "RESOLVE_BATTLE",
+            }
+            for idx in range(len(ActionType)):
+                name = action_names.get(idx, f"ACTION_{idx}")
+                raw_prob = action_probs_raw[idx].item()
+                masked_prob = action_probs_masked[idx].item()
+                legal = masks["action_type"].squeeze(0)[idx].item() >= 0
+                status = "✓" if legal else "✗"
+                print(
+                    f"  {status} {name}: RAW={raw_prob:.4f} | MASKED={masked_prob:.4f} ({masked_prob*100:.1f}%)"
+                )
+
+            legal_actions = {
+                action_names[idx]
+                for idx in range(len(ActionType))
+                if masks["action_type"].squeeze(0)[idx].item() >= 0
+            }
+
+            if "MOVE_UNIT" in legal_actions:
+                print(
+                    f"\n[State {self.current_index}] POLICY HEAD OUTPUT (UNIT for MOVE_UNIT):"
+                )
+                if num_units > 0:
+                    with torch.no_grad():
+                        unit_logits_raw = (
+                            self.agent.model.unit_head(unit_embs).squeeze(-1).squeeze(0)
+                        )
+                        unit_logits_masked = unit_logits_raw + masks["unit"].squeeze(0)
+                        unit_probs_raw = torch.softmax(unit_logits_raw, dim=0)
+                        unit_probs_masked = torch.softmax(
+                            torch.clamp(unit_logits_masked, min=-1e8), dim=0
+                        )
+                    for u_idx in range(num_units):
+                        uid = index_to_unit_id[u_idx]
+                        legal = masks["unit"].squeeze(0)[u_idx].item() >= 0
+                        status = "✓" if legal else "✗"
+                        print(
+                            f"  {status} U{uid}: RAW={unit_probs_raw[u_idx].item():.4f} | MASKED={unit_probs_masked[u_idx].item():.4f}"
+                        )
+                else:
+                    print("  (No alive units)")
+
+            if "BUY_UNIT" in legal_actions:
+                print(
+                    f"\n[State {self.current_index}] POLICY HEAD OUTPUT (UNIT_TYPE for BUY_UNIT):"
+                )
+                unit_type_names = ["CAVALRY", "INFANTRY", "LEADER", "DEFENSE"]
+                with torch.no_grad():
+                    unit_type_logits_raw = self.agent.model.unit_type_head(
+                        global_emb
+                    ).squeeze(0)
+                    unit_type_logits_masked = unit_type_logits_raw + masks[
+                        "unit_type"
+                    ].squeeze(0)
+                    unit_type_probs_raw = torch.softmax(unit_type_logits_raw, dim=0)
+                    unit_type_probs_masked = torch.softmax(
+                        torch.clamp(unit_type_logits_masked, min=-1e8), dim=0
+                    )
+
+                for idx, name in enumerate(unit_type_names):
+                    legal = masks["unit_type"].squeeze(0)[idx].item() >= 0
+                    status = "✓" if legal else "✗"
+                    print(
+                        f"  {status} {name}: RAW={unit_type_probs_raw[idx].item():.4f} | MASKED={unit_type_probs_masked[idx].item():.4f}"
+                    )
+
+            for context_action, mask_key in (
+                ("MOVE_UNIT", "tile_move"),
+                ("BUY_UNIT", "tile_buy"),
+                ("RESOLVE_BATTLE", "tile_battle"),
+            ):
+                if context_action not in legal_actions:
+                    continue
+
+                print(
+                    f"\n[State {self.current_index}] POLICY HEAD OUTPUT (TILE for {context_action}):"
+                )
+                with torch.no_grad():
+                    action_type_idx = {
+                        "MOVE_UNIT": ActionType.MOVE_UNIT.value,
+                        "BUY_UNIT": ActionType.BUY_UNIT.value,
+                        "RESOLVE_BATTLE": ActionType.RESOLVE_BATTLE.value,
+                    }[context_action]
+                    action_type_onehot = torch.zeros(
+                        len(ActionType), device=self.device
+                    )
+                    action_type_onehot[action_type_idx] = 1.0
+                    action_type_emb_per_tile = action_type_onehot.unsqueeze(0).expand(
+                        num_tiles, -1
+                    )
+                    unit_emb_per_tile = torch.zeros(
+                        num_tiles, self.agent.model._d_model, device=self.device
+                    )
+
+                    if context_action == "MOVE_UNIT" and num_units > 0:
+                        legal_unit_indices = torch.where(masks["unit"].squeeze(0) >= 0)[
+                            0
+                        ]
+                        if len(legal_unit_indices) > 0:
+                            unit_idx = int(legal_unit_indices[0].item())
+                            unit_emb_per_tile = (
+                                unit_embs.squeeze(0)[unit_idx]
+                                .unsqueeze(0)
+                                .expand(num_tiles, -1)
+                            )
+                            tile_mask = masks[mask_key].squeeze(0)[unit_idx]
+                        else:
+                            tile_mask = torch.full(
+                                (num_tiles,), float("-inf"), device=self.device
+                            )
+                    else:
+                        tile_mask = masks[mask_key].squeeze(0)
+
+                    tile_input = torch.cat(
+                        [
+                            tile_embs.squeeze(0),
+                            action_type_emb_per_tile,
+                            unit_emb_per_tile,
+                        ],
+                        dim=-1,
+                    )
+                    tile_logits_raw = self.agent.model.tile_head(tile_input).squeeze(-1)
+                    tile_logits_masked = tile_logits_raw + tile_mask
+                    tile_probs_raw = torch.softmax(tile_logits_raw, dim=0)
+                    tile_probs_masked = torch.softmax(
+                        torch.clamp(tile_logits_masked, min=-1e8), dim=0
+                    )
+
+                top_k = min(10, num_tiles)
+                top_tiles = torch.argsort(tile_probs_masked, descending=True)[:top_k]
+                for tidx in top_tiles:
+                    tile_id = int(tidx.item())
+                    legal = tile_mask[tile_id].item() >= 0
+                    status = "✓" if legal else "✗"
+                    print(
+                        f"  {status} T{tile_id}: RAW={tile_probs_raw[tile_id].item():.4f} | MASKED={tile_probs_masked[tile_id].item():.4f}"
+                    )
+
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            print(f"[ERROR] Failed to compute policy head: {e}")
 
     def _handle_events(self) -> None:
         max_idx = len(self.data.states) - 1
@@ -544,7 +851,11 @@ class GameVisualizer:
                 iux, iuy = int(ux), int(uy)
                 pygame.draw.circle(self.screen, color, (iux, iuy), unit_r)
                 pygame.draw.circle(self.screen, (0, 0, 0), (iux, iuy), unit_r, 2)
-                if unit.nation == state.current_nation:
+                # Highlight units of current nation (only if phase is nation-specific)
+                if (
+                    state.current_nation is not None
+                    and unit.nation == state.current_nation
+                ):
                     pygame.draw.circle(
                         self.screen, self.theme.accent, (iux, iuy), unit_r + 3, 2
                     )
@@ -589,13 +900,13 @@ class GameVisualizer:
     # ── Panel ─────────────────────────────────────────────────────────────────
 
     def _player_for_nation(self, nation: Nation) -> Optional[int]:
-        for player, nations in PLAYER_NATIONS.items():
+        for player, nations in self.data.preset_config.player_nations.items():
             if nation in nations:
                 return player.value
         return None
 
     def _nation_shade_index(self, nation: Nation) -> int:
-        for _player, nations in PLAYER_NATIONS.items():
+        for _player, nations in self.data.preset_config.player_nations.items():
             if nation in nations:
                 return nations.index(nation)
         return 0
@@ -644,14 +955,25 @@ class GameVisualizer:
         y += 26
 
         y = self._label_value(px, y, "TURN", str(state.turn_number))
-        nc = self._nation_color_from_state(state, state.current_nation)
-        y = self._label_value(
-            px,
-            y,
-            "ACTIVE NATION",
-            f"{state.current_nation.name} ({state.current_nation.value})",
-            nc,
-        )
+
+        # Handle global phase (no current nation)
+        if state.current_nation is not None:
+            nc = self._nation_color_from_state(state, state.current_nation)
+            y = self._label_value(
+                px,
+                y,
+                "ACTIVE NATION",
+                f"{state.current_nation.name} ({state.current_nation.value})",
+                nc,
+            )
+        else:
+            y = self._label_value(
+                px,
+                y,
+                "PHASE",
+                f"{state.phase.name} (Global)",
+                self.theme.text_secondary,
+            )
 
         score_label = (
             "POPULATION POINTS" if self.show_population_points else "VICTORY POINTS"
@@ -663,14 +985,15 @@ class GameVisualizer:
         ts, _ = self.fonts["small"].render(score_label, self.theme.text_secondary)
         self.screen.blit(ts, (px, y))
         y += 22
-        for nation in TURN_ORDER:
+        for nation in self.data.preset_config.turn_order:
             if nation not in nation_scores:
                 continue
             player_id = self._player_for_nation(nation)
             color = self._nation_color_from_state(state, nation)
             dot_x, dot_y = px + 7, y + 7
             pygame.draw.circle(self.screen, color, (dot_x, dot_y), 7)
-            if nation == state.current_nation:
+            # Only highlight if state has a current nation (not global phase)
+            if state.current_nation is not None and nation == state.current_nation:
                 pygame.draw.circle(self.screen, self.theme.accent, (dot_x, dot_y), 9, 2)
             player_text = (
                 f"Player {player_id}" if player_id is not None else "Unassigned"
@@ -851,6 +1174,11 @@ class GameVisualizer:
 
         prev_state = self.data.states[action_idx]
         buyer_nation = prev_state.current_nation
+
+        # Handle global phase (no buyer nation)
+        if buyer_nation is None:
+            return "(action during global phase)"
+
         tile_id = action.target_tile
         unit_name = action.unit_name or "Unknown"
 
@@ -859,7 +1187,7 @@ class GameVisualizer:
             tile_name = prev_state.tiles[tile_id].name
 
         unit_type = "Unknown"
-        roster = NATION_ROSTERS.get(buyer_nation)
+        roster = self.data.preset_config.rosters.get(buyer_nation)
         if roster is not None and action.unit_name is not None:
             stats = roster.get(action.unit_name)
             if stats is not None:
@@ -887,6 +1215,9 @@ def main() -> None:
         description="Visualize game logs with graph-based map"
     )
     parser.add_argument("--log", required=True, help="Path to game log JSON")
+    parser.add_argument(
+        "--model", default=None, help="Path to trained model checkpoint"
+    )
     parser.add_argument("--fps", type=int, default=60)
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--node-radius", type=int, default=30)
@@ -904,8 +1235,79 @@ def main() -> None:
         traceback.print_exc()
         raise SystemExit(f"Error loading game log: {e}")
 
+    # Load model if provided
+    agent = None
+    if args.model:
+        try:
+            model_path = Path(args.model)
+            if not model_path.exists():
+                raise SystemExit(f"Error: model checkpoint not found: {args.model}")
+
+            # Load checkpoint first to get config
+            checkpoint = torch.load(model_path, map_location="cpu")
+
+            if not isinstance(checkpoint, dict) or "model_state" not in checkpoint:
+                raise ValueError(
+                    f"Checkpoint format invalid. Expected dict with 'model_state' key."
+                )
+
+            # Extract saved config
+            saved_config = checkpoint.get("config", {})
+            if not saved_config:
+                raise ValueError("Checkpoint missing 'config' key")
+
+            # Recreate model using saved hyperparameters
+            preset_config = game_data.preset_config
+            model = SimpleModel(
+                num_tiles=saved_config.get("num_tiles"),
+                num_nations=saved_config.get("num_nations"),
+                d_model=saved_config.get("d_model", 128),
+                n_heads=saved_config.get("n_heads", 4),
+                n_layers=saved_config.get("n_layers", 2),
+                dropout=saved_config.get("dropout", 0.1),
+                device="cpu",
+            )
+
+            # Load model weights, padding the new turn-number column when the
+            # checkpoint predates this feature.
+            model_state = checkpoint["model_state"]
+            adapted_state = dict(model_state)
+            current_weight = model.global_proj.weight.data
+            loaded_weight = adapted_state.get("global_proj.weight")
+            if (
+                loaded_weight is not None
+                and loaded_weight.shape != current_weight.shape
+            ):
+                if (
+                    loaded_weight.shape[0] == current_weight.shape[0]
+                    and loaded_weight.shape[1] + 1 == current_weight.shape[1]
+                ):
+                    padded_weight = current_weight.clone()
+                    padded_weight[:, :-1] = loaded_weight
+                    adapted_state["global_proj.weight"] = padded_weight
+                else:
+                    raise ValueError(
+                        "Checkpoint global_proj.weight shape is incompatible with the current model"
+                    )
+
+            model.load_state_dict(adapted_state, strict=False)
+            model.eval()
+            agent = SimpleAgent(model, device="cpu", debug=False)
+            print(f"[OK] Loaded model from {args.model}")
+            print(
+                f"     Config: d_model={saved_config.get('d_model')}, "
+                f"n_heads={saved_config.get('n_heads')}, "
+                f"n_layers={saved_config.get('n_layers')}"
+            )
+        except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            print(f"[WARN] Failed to load model: {e}")
+            agent = None
+
     config = Config(fps=args.fps, node_radius=args.node_radius)
-    viz = GameVisualizer(game_data, config)
+    viz = GameVisualizer(game_data, config, agent=agent)
     viz.current_index = max(0, min(args.start, len(game_data.states) - 1))
 
     print(f"Loaded : {args.log}")
@@ -913,6 +1315,8 @@ def main() -> None:
     print(f"Tiles  : {len(game_data.states[0].tiles)}")
     print(f"Nations: {len(game_data.states[0].vp_scores)}")
     print(f"Window : {viz.win_w} × {viz.win_h}")
+    if agent:
+        print("[OK] Model loaded - value head output will be printed on state changes")
     print("\nStarting visualizer…")
 
     viz.run()

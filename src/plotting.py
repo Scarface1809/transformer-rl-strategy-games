@@ -36,3 +36,35 @@ def plot_eval_history(history, output_path):
     plt.savefig(output_path, dpi=150)
     plt.close()
     return output_path
+
+
+def plot_training_metrics(history, output_path):
+    """
+    Plot training metrics on a single figure: Return, Policy Loss, Value Loss, Entropy.
+    `history` is a list of dicts with keys: episode, return, policy, value, entropy
+    """
+    if not history:
+        return None
+
+    episodes = [h["episode"] for h in history]
+    returns = [h.get("return", 0.0) for h in history]
+    policy = [h.get("policy", 0.0) for h in history]
+    value = [h.get("value", 0.0) for h in history]
+    entropy = [h.get("entropy", 0.0) for h in history]
+
+    plt.figure(figsize=(16, 6))
+    plt.plot(episodes, returns, marker="o", color="tab:blue", label="Return")
+    plt.plot(episodes, policy, marker="x", color="tab:orange", label="Policy Loss")
+    plt.plot(episodes, value, marker="s", color="tab:green", label="Value Loss")
+    plt.plot(episodes, entropy, marker="^", color="tab:red", label="Entropy")
+
+    plt.title("Training metrics")
+    plt.xlabel("Episode")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    return output_path
