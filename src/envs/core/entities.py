@@ -299,7 +299,7 @@ class Action:
 @dataclass
 class GameState:
     turn_number: int
-    current_nation: Nation
+    current_nation: Nation | None
     phase: Phase
 
     units: Dict[int, Unit]
@@ -320,9 +320,9 @@ class GameState:
             pop_points=defaultdict(int),
         )
 
-        # Initialize VP and population points for all nations to 0
-        # TODO: This is doing for all nations not playing nations okay i guess.
-        for nation in Nation:
+        # Initialize VP and population points for active nations only
+        active_nations = {u.nation for u in units.values()}
+        for nation in active_nations:
             state.vp_scores[nation] = 0
             state.pop_points[nation] = 0
 
@@ -334,7 +334,12 @@ class GameState:
 
     @property
     def num_nations(self) -> int:
-        return len(Nation)
+        return len(self.vp_scores)
+
+    @property
+    def playing_nations(self) -> list[Nation]:
+        """Return nations in play (ordered by value for consistent indexing)."""
+        return sorted(self.vp_scores.keys(), key=lambda n: n.value)
 
     @property
     def active_nations(self) -> set[Nation]:
@@ -405,7 +410,9 @@ class GameState:
     def to_dict(self) -> dict:
         return {
             "turn_number": int(self.turn_number),
-            "current_nation": self.current_nation.value,
+            "current_nation": (
+                self.current_nation.value if self.current_nation is not None else None
+            ),
             "phase": self.phase.name,
             "vp_scores": {k.value: int(v) for k, v in self.vp_scores.items()},
             "pop_points": {k.value: int(v) for k, v in self.pop_points.items()},
@@ -415,10 +422,18 @@ class GameState:
 
     @staticmethod
     def from_dict(d: dict) -> "GameState":
+        current_nation_val = d.get("current_nation")
+        current_nation = (
+            Nation(current_nation_val) if current_nation_val is not None else None
+        )
+        phase_name = str(d.get("phase", "GROWTH"))
+        if phase_name == "GLOBAL":
+            phase_name = "GROWTH"
+        phase = Phase.__members__.get(phase_name, Phase.GROWTH)
         state = GameState(
             turn_number=int(d.get("turn_number", 0)),
-            current_nation=Nation(d.get("current_nation", Nation.CARTHAGE.value)),
-            phase=Phase[d.get("phase", "GROWTH")],
+            current_nation=current_nation,
+            phase=phase,
             vp_scores=defaultdict(
                 int,
                 {Nation(int(k)): int(v) for k, v in d.get("vp_scores", {}).items()},
@@ -437,3 +452,40 @@ class GameState:
             unit = Unit.from_dict(ud)
             state.units[unit.id] = unit
         return state
+
+
+@dataclass
+class GameLog:
+    preset: str
+    seed: int | None
+    max_turns: int | None
+    initial_state: dict
+    states: list[dict] = field(default_factory=list)
+    actions: list[dict] = field(default_factory=list)
+    action_logs: list[str] = field(default_factory=list)
+    final_state: dict | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "preset": self.preset,
+            "seed": self.seed,
+            "max_turns": self.max_turns,
+            "initial_state": self.initial_state,
+            "states": self.states,
+            "actions": self.actions,
+            "action_logs": self.action_logs,
+            "final_state": self.final_state,
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> "GameLog":
+        return GameLog(
+            preset=str(d.get("preset", "hispania")),
+            seed=d.get("seed"),
+            max_turns=d.get("max_turns"),
+            initial_state=dict(d.get("initial_state", {})),
+            states=[dict(state) for state in d.get("states", [])],
+            actions=[dict(action) for action in d.get("actions", [])],
+            action_logs=[str(log) for log in d.get("action_logs", [])],
+            final_state=d.get("final_state"),
+        )

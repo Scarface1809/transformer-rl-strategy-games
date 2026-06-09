@@ -1,12 +1,14 @@
 from __future__ import annotations
 from typing import Dict
 
-from envs.data.player_nations import PLAYER_NATIONS
+from envs.presets.hispania.data.player_nations import PLAYER_NATIONS
 from envs.core.enums import Nation, Player, EdgeType, UnitType
 from envs.core.entities import Tile, Unit, UnitStats, Edge
-from envs.data.tiles import TILES
-from envs.data.rosters import NATION_ROSTERS
-from envs.data.turn_order import TURN_ORDER
+from envs.presets.hispania.data.tiles import TILES
+from envs.presets.hispania.data.rosters import NATION_ROSTERS
+from envs.presets.hispania.data.turn_order import TURN_ORDER
+from envs.presets.hispania.data.nation_goals import REWARD_TILES
+from envs.presets.hispania.data.hispania_layout import HISPANIA_TILE_POSITIONS
 from envs.presets.registry import register_preset
 from envs.presets.config import PresetConfig
 
@@ -97,6 +99,11 @@ def _register() -> PresetConfig:
     return PresetConfig(
         name="hispania",
         max_turns=20,
+        turn_order=TURN_ORDER,
+        player_nations=PLAYER_NATIONS,
+        reward_tiles=REWARD_TILES,
+        tile_positions=HISPANIA_TILE_POSITIONS,
+        rosters=NATION_ROSTERS,
         board_factory=_build_board,
         units_factory=_build_units,
     )

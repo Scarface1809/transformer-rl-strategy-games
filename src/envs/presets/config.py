@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List
 
 from envs.core.enums import Nation, Player
-from envs.core.entities import Tile, Unit
+from envs.core.entities import Tile, Unit, Roster
 
 
 @dataclass
@@ -12,6 +12,11 @@ class PresetConfig:
 
     # Turn order and active nations
     max_turns: int
+    turn_order: List[Nation]
+    player_nations: Dict[Player, List[Nation]]
+    reward_tiles: Dict[Nation, Dict[int, int]]  # nation -> {tile_id: vp_value}
+    tile_positions: Dict[int, tuple]  # tile_id -> (normalized_x, normalized_y)
+    rosters: Dict[Nation, Roster]  # nation -> unit roster
 
     # Board and unit factories
     board_factory: Callable[[], Dict[int, Tile]]
