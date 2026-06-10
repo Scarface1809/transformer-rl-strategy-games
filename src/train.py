@@ -305,6 +305,7 @@ def train_episodes(
             entropies = torch.stack(entropy_list)  # (T,)
 
             # PPO clipped policy loss — driven by acting-nation advantage only
+            # Policy Loss
             ratio = torch.exp(new_log_probs - old_log_probs)
             surr1 = ratio * policy_advantages
             surr2 = (
@@ -314,9 +315,24 @@ def train_episodes(
             policy_loss = -torch.min(surr1, surr2).mean()
 
             # Value loss — trains ALL nation heads jointly
-            value_loss = F.mse_loss(new_values, all_returns)
+            #value_loss = F.mse_loss(new_values, all_returns)
+            value_pred_clipped = old_values + torch.clamp(
+                new_values - old_values,
+                -cfg.eps_clip,
+                cfg.eps_clip,
+            )
 
+            value_loss_unclipped = (new_values - all_returns).pow(2)
+            value_loss_clipped = (value_pred_clipped - all_returns).pow(2)
+
+            value_loss = torch.max(
+                value_loss_unclipped,
+                value_loss_clipped,
+            ).mean()
+
+            # Entropy Loss
             entropy_loss = -entropies.mean()
+
             kl_div = (old_log_probs.detach() - new_log_probs).mean()
 
             loss = (
