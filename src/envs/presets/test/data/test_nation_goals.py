@@ -3,5 +3,5 @@
 from envs.core.enums import Nation
 
 TEST_REWARD_TILES = {
-    Nation.CARTHAGE: {3: 1},  # Tile 3 gives 1 VP
+    Nation.CARTHAGE: {3: 1, 2: 1},  # Tile 3 gives 1 VP
 }

@@ -1,32 +1,29 @@
 from __future__ import annotations
 from typing import Dict
 
-from envs.presets.test.data.test_player_nations import TEST_PLAYER_NATIONS
 from envs.core.enums import Nation, Player, EdgeType, UnitType
 from envs.core.entities import Tile, Unit, Edge
-from envs.presets.test.data.test_tiles import TEST_TILES
-from envs.presets.test.data.test_turn_order import TEST_TURN_ORDER
-from envs.presets.test.data.test_nation_goals import TEST_REWARD_TILES
-from envs.presets.test.data.test_layout import TEST_TILE_POSITIONS
-from envs.presets.test.data.rosters import NATION_ROSTERS
+from envs.presets.small.data.player_nations import THREE_BY_THREE_PLAYER_NATIONS
+from envs.presets.small.data.tiles import THREE_BY_THREE_TILES
+from envs.presets.small.data.turn_order import THREE_BY_THREE_TURN_ORDER
+from envs.presets.small.data.nation_goals import THREE_BY_THREE_REWARD_TILES
+from envs.presets.small.data.layout import THREE_BY_THREE_TILE_POSITIONS
+from envs.presets.small.data.rosters import NATION_ROSTERS
 from envs.presets.registry import register_preset
 from envs.presets.config import PresetConfig
 
 _STARTING_TILES: Dict[Nation, list[int]] = {
-    Nation.CARTHAGE: [0],  # Start on tile 0
+    Nation.CARTHAGE: [0],
+    Nation.ROME: [8],
 }
 
-_UNITS_PER_TILE = 2
-
-# ---------------------------------------------------------------------------
-# Board
-# ---------------------------------------------------------------------------
+_UNITS_PER_TILE = 1
 
 
 def _build_board() -> Dict[int, Tile]:
     tiles: Dict[int, Tile] = {}
 
-    for tile_id, data in TEST_TILES.items():
+    for tile_id, data in THREE_BY_THREE_TILES.items():
         tiles[tile_id] = Tile(
             id=tile_id,
             name=data["name"],
@@ -37,25 +34,18 @@ def _build_board() -> Dict[int, Tile]:
             city_eligible=data["city_eligible"],
         )
 
-    for tile_id, data in TEST_TILES.items():
+    for tile_id, data in THREE_BY_THREE_TILES.items():
         for nbr_id, edge_type in data["neighbors"]:
-            # Forward edge
             if nbr_id not in tiles[tile_id].adjacencies:
                 tiles[tile_id].adjacencies[nbr_id] = Edge(
                     tile_a=tile_id, tile_b=nbr_id, edge_type=edge_type
                 )
-            # Reverse edge — ensure symmetry
             if tile_id not in tiles[nbr_id].adjacencies:
                 tiles[nbr_id].adjacencies[tile_id] = Edge(
                     tile_a=nbr_id, tile_b=tile_id, edge_type=edge_type
                 )
 
     return tiles
-
-
-# ---------------------------------------------------------------------------
-# Units
-# ---------------------------------------------------------------------------
 
 
 def _build_units(tiles: Dict[int, Tile]) -> Dict[int, Unit]:
@@ -81,20 +71,15 @@ def _build_units(tiles: Dict[int, Tile]) -> Dict[int, Unit]:
     return units
 
 
-# ---------------------------------------------------------------------------
-# Registration
-# ---------------------------------------------------------------------------
-
-
-@register_preset("test")
+@register_preset("small")
 def _register() -> PresetConfig:
     return PresetConfig(
-        name="test",
+        name="small",
         max_turns=20,
-        turn_order=TEST_TURN_ORDER,
-        player_nations=TEST_PLAYER_NATIONS,
-        reward_tiles=TEST_REWARD_TILES,
-        tile_positions=TEST_TILE_POSITIONS,
+        turn_order=THREE_BY_THREE_TURN_ORDER,
+        player_nations=THREE_BY_THREE_PLAYER_NATIONS,
+        reward_tiles=THREE_BY_THREE_REWARD_TILES,
+        tile_positions=THREE_BY_THREE_TILE_POSITIONS,
         rosters=NATION_ROSTERS,
         board_factory=_build_board,
         units_factory=_build_units,
