@@ -1,7 +1,7 @@
 import random
 import torch
 from envs.core.entities import Action
-from envs.core.enums import ActionType
+from envs.core.enums import ActionType, UnitType
 
 
 class RandomAgent:
@@ -37,11 +37,11 @@ class RandomAgent:
                 ut_mask = env.get_unit_type_mask("cpu")
                 valid_types = [i for i, v in enumerate(ut_mask) if v == 0.0]
                 ut_idx = random.choice(valid_types)
-                unit_name = env.get_unit_name_for_type(ut_idx)
+                unit_type = UnitType(ut_idx)
                 t_mask = env.get_tile_mask_for_buy(num_tiles, "cpu")
                 valid_tiles = [i for i, v in enumerate(t_mask) if v == 0.0]
                 tile_id = random.choice(valid_tiles)
-                return Action.buy_unit(tile_id, unit_name)
+                return Action.buy_unit(tile_id, unit_type)
             case ActionType.RESOLVE_BATTLE:
                 t_mask = env.get_tile_mask_for_battle(num_tiles, "cpu")
                 valid_tiles = [i for i, v in enumerate(t_mask) if v == 0.0]

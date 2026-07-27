@@ -11,6 +11,7 @@ from envs.core.entities import (
     TerrainType,
     Tile,
 )
+from envs.core.enums import UnitType
 from envs.env import SimpleHispaniaEnv
 
 
@@ -25,45 +26,37 @@ class SimpleAgent:
 
     # ── Public interface ───────────────────────────────────────────────────────
 
-    def select_action(self, env: SimpleHispaniaEnv) -> tuple[
-        Action,
-        dict,
-        torch.Tensor,
-        torch.Tensor,
-        dict,
+    def build_model_inputs_and_masks(
+        self, env: SimpleHispaniaEnv
+    ) -> tuple[
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        dict[str, torch.Tensor],
+        list[int],
     ]:
         state: GameState = env.state
 
-        # --- Build input tensors for model ---
-        global_feats = self._build_global_feats(state, max_turns=env.config.max_turns)
-        tile_feats = self._build_tile_feats(
+        global_feats = self.build_global_feats(state, max_turns=env.config.max_turns)
+        tile_feats = self.build_tile_feats(
             state, env.config.reward_tiles, state.num_nations
         )
-        unit_feats, unit_id_to_index, index_to_unit_id = self._build_unit_feats(state)
+        unit_feats, index_to_unit_id = self.build_unit_feats(state)
 
-        # Build masks from env and pass them to the model so sampling respects
-        # environment legality. Masks use batch dim (B=1) for the agent.
         num_tiles = state.num_tiles
         num_units = unit_feats.size(1)
 
         masks: dict[str, torch.Tensor] = {}
         masks["action_type"] = env.get_action_type_mask(self.device).unsqueeze(0)
 
-        # unit mask for MOVE_UNIT head (shape: num_units) -> batch dim
         if num_units > 0:
             masks["unit"] = env.get_unit_mask_for_move(
-                unit_id_to_index, num_units, self.device
+                index_to_unit_id, num_units, self.device
             ).unsqueeze(0)
         else:
             masks["unit"] = torch.full((1, 0), float("-inf"), device=self.device)
 
-        # unit_type mask for BUY_UNIT head
         masks["unit_type"] = env.get_unit_type_mask(self.device).unsqueeze(0)
-
-        # tile masks for BUY and BATTLE (batch dim)
         masks["tile_buy"] = env.get_tile_mask_for_buy(num_tiles, self.device).unsqueeze(
             0
         )
@@ -71,7 +64,6 @@ class SimpleAgent:
             num_tiles, self.device
         ).unsqueeze(0)
 
-        # tile_move: per-unit masks (B, num_units, num_tiles)
         if num_units > 0:
             tile_move_list = []
             for uid in index_to_unit_id:
@@ -82,74 +74,70 @@ class SimpleAgent:
         else:
             masks["tile_move"] = torch.zeros((1, 0, num_tiles), device=self.device)
 
-        # Forward Pass — model now returns sampled actions + log_prob + value
-        out = self.model(global_feats, tile_feats, unit_feats, masks=masks)
+        return global_feats, tile_feats, unit_feats, masks, index_to_unit_id
 
-        # Batch size is 1 for agent usage
-        # Keep tensors for actions so they can be stored for PPO updates
-        action_type_tensor = out["action_type"].squeeze(0)
-        unit_tensor = out["unit"].squeeze(0)
-        unit_type_tensor = out["unit_type"].squeeze(0)
-        tile_tensor = out["tile"].squeeze(0)
-        total_log_prob = out["log_prob"].squeeze(0)
-        value_dist = out["value"].squeeze(0)
+    def enumerate_legal_actions(
+        self,
+        env: SimpleHispaniaEnv,
+        masks: dict[str, torch.Tensor],
+        index_to_unit_id: list[int],
+    ) -> list[Action]:
+        state = env.state
+        num_units = len(index_to_unit_id)
+        actions: list[Action] = []
 
-        action_type_idx = int(action_type_tensor.item())
-        unit_idx = int(unit_tensor.item())
-        unit_type_idx = int(unit_type_tensor.item())
-        tile_idx = int(tile_tensor.item())
+        at_allowed = (masks["action_type"].squeeze(0) != float("-inf")).nonzero()
+        at_indices = [int(x.item()) for x in at_allowed]
 
-        action_type = ActionType(action_type_idx)
+        for at in at_indices:
+            if at == ActionType.END_PHASE.value:
+                actions.append(Action.end_phase())
 
-        # Map sampled indices back to environment ids / names
-        unit_id = None
-        unit_name = None
-        tile_id = None
-
-        if unit_idx >= 0 and index_to_unit_id and unit_idx < len(index_to_unit_id):
-            unit_id = index_to_unit_id[unit_idx]
-
-        if unit_type_idx >= 0:
-            unit_name = env.get_unit_name_for_type(unit_type_idx)
-
-        if tile_idx >= 0:
-            tile_id = int(tile_idx)
-
-        action = self._build_action(action_type, unit_id, tile_id, unit_name)
-
-        # Build actions dict of sampled indices (detached) to store in trajectories
-        actions_dict = {
-            "action_type": action_type_tensor.detach().clone(),
-            "unit": unit_tensor.detach().clone(),
-            "unit_type": unit_type_tensor.detach().clone(),
-            "tile": tile_tensor.detach().clone(),
-        }
-
-        # Return: Action object, actions_dict, detached log_prob, detached value vector,
-        # masks and the feature tensors (for later re-evaluation during PPO update)
-        return (
-            action,
-            actions_dict,
-            total_log_prob.detach(),
-            value_dist.detach(),
-            masks,
-            global_feats.detach(),
-            tile_feats.detach(),
-            unit_feats.detach(),
-        )
-
+            elif at == ActionType.MOVE_UNIT.value:
+                if num_units > 0:
+                    unit_mask = masks["unit"].squeeze(0)
+                    unit_allowed = (unit_mask != float("-inf")).nonzero()
+                    for uid_idx in unit_allowed:
+                        uidx = int(uid_idx.item())
+                        tile_mask = masks["tile_move"].squeeze(0)[uidx]
+                        tile_allowed = (tile_mask != float("-inf")).nonzero()
+                        for tidx in tile_allowed:
+                            t = int(tidx.item())
+                            unit_id = index_to_unit_id[uidx]
+                            actions.append(Action.move(unit_id, t))
+            elif at == ActionType.BUY_UNIT.value:
+                unit_type_mask = masks["unit_type"].squeeze(0)
+                unit_type_allowed = (unit_type_mask != float("-inf")).nonzero()
+                tile_mask = masks["tile_buy"].squeeze(0)
+                tile_allowed = (tile_mask != float("-inf")).nonzero()
+                for ut in unit_type_allowed:
+                    unit_type_idx = int(ut.item())
+                    unit_type = UnitType(unit_type_idx)
+                    for tt in tile_allowed:
+                        tile_idx = int(tt.item())
+                        actions.append(Action.buy_unit(tile_idx, unit_type))
+            elif at == ActionType.RESOLVE_BATTLE.value:
+                tile_mask = masks["tile_battle"].squeeze(0)
+                tile_allowed = (tile_mask != float("-inf")).nonzero()
+                for tt in tile_allowed:
+                    tile_idx = int(tt.item())
+                    actions.append(Action.resolve_battle(tile_idx))
+        return actions
+    
     # ── Feature builders ────────────────────────────
 
-    def _build_global_feats(
+    def build_global_feats(
         self, state: GameState, max_turns: int | None = None
     ) -> torch.Tensor:
         num_playing_nations = state.num_nations
+        # Expand feature dimension: phase is still one-hot, but turn is now one-hot instead of scalar
+        turn_dim = max_turns if max_turns is not None else 1
         global_feats = torch.zeros(
             num_playing_nations
             + len(Phase)
             + num_playing_nations
             + num_playing_nations
-            + 1,
+            + turn_dim,
             device=self.device,
         )
 
@@ -176,14 +164,17 @@ class SimpleAgent:
                 float(state.pop_points[nation])
             )
 
-        turn_value = float(state.turn_number)
-        if max_turns and max_turns > 0:
-            turn_value /= float(max_turns)
-        global_feats[-1] = turn_value
+        # one-hot turn progress
+        if max_turns is not None and max_turns > 0:
+            turn_one_hot = F.one_hot(
+                torch.tensor(min(state.turn_number, max_turns - 1), dtype=torch.long, device=self.device),
+                num_classes=turn_dim
+            ).float()
+            global_feats[num_playing_nations + len(Phase) + num_playing_nations + num_playing_nations : ] = turn_one_hot
 
         return global_feats.unsqueeze(0).unsqueeze(1)  # (1, 1, global_feat_dim)
 
-    def _build_tile_feats(self, state: GameState, reward_tiles: dict, num_nations: int):
+    def build_tile_feats(self, state: GameState, reward_tiles: dict, num_nations: int):
         tile_ids = sorted(state.tiles.keys())
         num_tiles = state.num_tiles
         # one-hot(tile_id) + one-hot(terrain) + base_population_points + num_units_on_tile + [vp_per_nation]
@@ -211,7 +202,7 @@ class SimpleAgent:
             feats.append(feat)
         return torch.stack(feats).unsqueeze(0)  # (1, T, C)
 
-    def _build_unit_feats(self, state: GameState):
+    def build_unit_feats(self, state: GameState) -> tuple[torch.Tensor, list[int]]:
         units = sorted([u for u in state.units.values() if u.alive], key=lambda u: u.id)
         num_nations = state.num_nations
         num_tiles = state.num_tiles
@@ -224,17 +215,10 @@ class SimpleAgent:
             # Return empty tensor with correct shape if no units are alive
             return (
                 torch.zeros(1, 0, feat_dim, device=self.device),
-                torch.zeros(0, dtype=torch.long, device=self.device),
                 index_to_unit_id,
             )
-
-        max_id = max(u.id for u in units)
-        unit_id_to_index = torch.full(
-            (max_id + 1,), -1, dtype=torch.long, device=self.device
-        )
         feats = []
         for i, u in enumerate(units):
-            unit_id_to_index[u.id] = i
             feat = torch.zeros(
                 feat_dim,
                 device=self.device,
@@ -265,41 +249,4 @@ class SimpleAgent:
             feats.append(feat)
 
         unit_feats = torch.stack(feats).unsqueeze(0)  # (1, U, C)
-        return unit_feats, unit_id_to_index, index_to_unit_id
-
-    # ── Action construction ────────────────────────────────────────────────────
-
-    @staticmethod
-    def _build_action(
-        action_type: ActionType,
-        unit_id: int | None,
-        tile_id: int | None,
-        unit_name: str | None,
-    ) -> Action:
-        """Map sampled components back to a concrete Action object."""
-        match action_type:
-            case ActionType.END_PHASE:
-                return Action.end_phase()
-            case ActionType.MOVE_UNIT:
-                if unit_id is None or tile_id is None:
-                    print(
-                        f"[Agent] Warning: MOVE_UNIT action missing unit_id or tile_id, defaulting to END_PHASE"
-                    )
-                    return Action.end_phase()
-                return Action.move(unit_id, tile_id)
-            case ActionType.BUY_UNIT:
-                if unit_name is None or tile_id is None:
-                    print(
-                        f"[Agent] Warning: BUY_UNIT action missing unit_name or tile_id, defaulting to END_PHASE"
-                    )
-                    return Action.end_phase()
-                return Action.buy_unit(tile_id, unit_name)
-            case ActionType.RESOLVE_BATTLE:
-                if tile_id is None:
-                    print(
-                        f"[Agent] Warning: RESOLVE_BATTLE action missing tile_id, defaulting to END_PHASE"
-                    )
-                    return Action.end_phase()
-                return Action.resolve_battle(tile_id)
-            case _:
-                return Action.end_phase()
+        return unit_feats, index_to_unit_id

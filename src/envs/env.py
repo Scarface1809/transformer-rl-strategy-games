@@ -1,4 +1,5 @@
 from __future__ import annotations
+import copy
 import numpy as np
 from typing import Dict, List
 import torch
@@ -57,7 +58,7 @@ class SimpleHispaniaEnv:
             case ActionType.END_PHASE:
                 rewards = self._end_phase()
             case ActionType.BUY_UNIT:
-                rewards = self._buy_unit(action.target_tile, action.unit_name)
+                rewards = self._buy_unit(action.target_tile, action.unit_type)
             case ActionType.MOVE_UNIT:
                 rewards = self._move_unit(action.unit_id, action.target_tile)
             case ActionType.RESOLVE_BATTLE:
@@ -113,7 +114,7 @@ class SimpleHispaniaEnv:
 
     def get_unit_mask_for_move(
         self,
-        unit_id_to_index: torch.Tensor,
+        index_to_unit_id: list[int],
         num_units: int,
         device: str,
     ) -> torch.Tensor:
@@ -124,21 +125,17 @@ class SimpleHispaniaEnv:
         `unit_id_to_index` is the tensor built by the agent mapping unit_id → row
         index in the unit_embs tensor.
         """
-        mask = torch.full((num_units,), self._NEG_INF, device=device)
+        mask = torch.full((len(index_to_unit_id),), self._NEG_INF, device=device)
         nation = self.state.current_nation
+        for idx, unit_id in enumerate(index_to_unit_id):
+            unit = self.state.units[unit_id]
 
-        for u in self.state.units.values():
-            if u.nation != nation or not u.alive:
-                continue
-            if not u.current_movement_points:
-                continue
-            if not self._unit_can_move_somewhere(u):
-                continue
-            uid = u.id
-            if uid >= len(unit_id_to_index):
-                continue
-            idx = int(unit_id_to_index[uid].item())
-            if 0 <= idx < num_units:
+            if (
+                unit.nation == nation
+                and unit.alive
+                and unit.current_movement_points
+                and self._unit_can_move_somewhere(unit)
+            ):
                 mask[idx] = 0.0
 
         return mask
@@ -278,7 +275,7 @@ class SimpleHispaniaEnv:
                 print(f"Warning: unhandled phase {self.state.phase} in end_phase")
                 return {}
 
-    def _buy_unit(self, tile_id: int, unit_name: str) -> Dict[Nation, float]:
+    def _buy_unit(self, tile_id: int, unit_type: UnitType) -> Dict[Nation, float]:
         nation: Nation = self.state.current_nation
         roster: Roster = self.config.rosters.get(nation)
 
@@ -299,9 +296,20 @@ class SimpleHispaniaEnv:
             )
             return {}
 
-        stats: UnitStats = next(
-            (u for u in purchasable_units if u.name == unit_name), None
-        )
+        # Find a purchasable unit matching the requested UnitType
+        stats: UnitStats | None = None
+        if unit_type is not None:
+            for u in purchasable_units:
+                if u.type == unit_type:
+                    stats = u
+                    break
+
+        if stats is None:
+            print(
+                f"Warning: unit of type {unit_type} not purchasable for {nation} with "
+                f"{self.state.pop_points.get(nation, 0)} pop points and current supply"
+            )
+            return {}
 
         if stats is None:
             print(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
+from collections.abc import Sequence
 from typing import Dict
 from envs.core.enums import (
     Nation,
@@ -241,7 +242,7 @@ class Action:
     type: ActionType
     unit_id: int | None = None
     target_tile: int | None = None
-    unit_name: str | None = None
+    unit_type: UnitType | None = None
 
     def __str__(self) -> str:
         if self.type == ActionType.END_PHASE:
@@ -263,11 +264,11 @@ class Action:
         return cls(ActionType.END_PHASE)
 
     @classmethod
-    def buy_unit(cls, target_tile: int, unit_name: str) -> "Action":
+    def buy_unit(cls, target_tile: int, unit_type: UnitType) -> "Action":
         return cls(
             ActionType.BUY_UNIT,
             target_tile=target_tile,
-            unit_name=unit_name,
+            unit_type=unit_type,
         )
 
     @classmethod
@@ -281,7 +282,7 @@ class Action:
             "type": self.type.value,
             "unit_id": self.unit_id,
             "target_tile": self.target_tile,
-            "unit_name": self.unit_name,
+            "unit_type": self.unit_type.value if self.unit_type is not None else None,
         }
 
     @staticmethod
@@ -292,9 +293,48 @@ class Action:
             target_tile=(
                 int(d["target_tile"]) if d.get("target_tile") is not None else None
             ),
-            unit_name=(str(d["unit_name"]) if d.get("unit_name") is not None else None),
+            unit_type=(UnitType(d["unit_type"]) if d.get("unit_type") is not None else None),
         )
 
+def redistribute_turn_end_rewards(
+    rewards: Sequence[Dict[Nation, float]],
+    turn_numbers: Sequence[int],
+    decay: float = 0.95,
+) -> list[Dict[Nation, float]]:
+    if len(rewards) != len(turn_numbers):
+        raise ValueError("rewards and turn_numbers must have the same length")
+
+    if not rewards:
+        return []
+
+    shaped: list[Dict[Nation, float]] = [dict(r) for r in rewards]
+
+    start = 0
+    while start < len(rewards):
+        end = start + 1
+        while end < len(rewards) and turn_numbers[end] == turn_numbers[start]:
+            end += 1
+
+        segment_len = end - start
+        final_rewards = rewards[end - 1]
+
+        if segment_len > 1 and final_rewards:
+            weights = [decay**idx for idx in range(segment_len)]
+            total_weight = sum(weights)
+            if total_weight > 0.0:
+                for nation, reward_value in final_rewards.items():
+                    if reward_value == 0.0:
+                        continue
+                    shaped[end - 1][nation] = shaped[end - 1].get(nation, 0.0) - reward_value
+                    for offset, weight in enumerate(weights):
+                        shaped[start + offset][nation] = (
+                            shaped[start + offset].get(nation, 0.0)
+                            + reward_value * (weight / total_weight)
+                        )
+
+        start = end
+
+    return shaped
 
 @dataclass
 class GameState:

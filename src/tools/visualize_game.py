@@ -419,7 +419,7 @@ class GameVisualizer:
         )
         env.state = state
 
-        unit_feats, unit_id_to_index, index_to_unit_id = self.agent._build_unit_feats(
+        unit_feats, unit_id_to_index, index_to_unit_id = self.agent.build_unit_feats(
             state
         )
         num_tiles = state.num_tiles
@@ -468,14 +468,14 @@ class GameVisualizer:
             state = self.data.states[self.current_index]
 
             # Extract features using agent's methods
-            global_feats = self.agent._build_global_feats(
+            global_feats = self.agent.build_global_feats(
                 state, max_turns=self.data.preset_config.max_turns
             )
-            tile_feats = self.agent._build_tile_feats(
+            tile_feats = self.agent.build_tile_feats(
                 state, self.data.preset_config.reward_tiles, state.num_nations
             )
             unit_feats, unit_id_to_index, index_to_unit_id = (
-                self.agent._build_unit_feats(state)
+                self.agent.build_unit_feats(state)
             )
 
             batch_size = global_feats.size(0)
@@ -1180,7 +1180,7 @@ class GameVisualizer:
             return "(action during global phase)"
 
         tile_id = action.target_tile
-        unit_name = action.unit_name or "Unknown"
+        unit_name = "Unknown"
 
         tile_name = "Unknown"
         if tile_id is not None and tile_id in prev_state.tiles:
@@ -1188,10 +1188,11 @@ class GameVisualizer:
 
         unit_type = "Unknown"
         roster = self.data.preset_config.rosters.get(buyer_nation)
-        if roster is not None and action.unit_name is not None:
-            stats = roster.get(action.unit_name)
-            if stats is not None:
-                unit_type = stats.type.name
+        if roster is not None and getattr(action, "unit_type", None) is not None:
+            stats_list = roster.by_type(action.unit_type)
+            if stats_list:
+                unit_name = stats_list[0].name
+                unit_type = stats_list[0].type.name
 
         if tile_id is None:
             return (
@@ -1266,6 +1267,7 @@ def main() -> None:
                 n_layers=saved_config.get("n_layers", 2),
                 dropout=saved_config.get("dropout", 0.1),
                 device="cpu",
+                max_turns=saved_config.get("max_turns", preset_config.max_turns),
             )
 
             # Load model weights, padding the new turn-number column when the

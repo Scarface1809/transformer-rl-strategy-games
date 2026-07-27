@@ -1,26 +1,56 @@
 from __future__ import annotations
 
-import json
-import os
+import sys
 import time
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from pathlib import Path
+from typing import Dict
 
-import numpy as np
 import torch
 
+from replay_buffer import ReplayBuffer
+from train import train_epoch
+from self_play import SelfPlayGame
+from agents.simple_agent import SimpleAgent
 from config import Config, EnvConfig, ModelConfig
+from envs.core.enums import Player
 from envs.env import SimpleHispaniaEnv
 from evaluate import evaluate
 from models.simple_model import SimpleModel
-from plotting import plot_eval_history
-from train import train_episodes
-
+from logging_manager import LogManager
+from metrics import MetricsCollector
+import plotting
 # =============================================================================
 # Builders
 # =============================================================================
 
 
+class _TeeStream:
+    def __init__(self, *streams) -> None:
+        self._streams = streams
+
+    def write(self, text: str) -> int:
+        for stream in self._streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()
+
+
+@contextmanager
+def _tee_console_output(log_path: Path):
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as log_file:
+        stdout_tee = _TeeStream(sys.stdout, log_file)
+        stderr_tee = _TeeStream(sys.stderr, log_file)
+        with redirect_stdout(stdout_tee), redirect_stderr(stderr_tee):
+            yield
+
+
 def build_env(env_cfg: EnvConfig) -> SimpleHispaniaEnv:
-    return SimpleHispaniaEnv(preset=env_cfg.preset)
+    return SimpleHispaniaEnv(preset=env_cfg.preset, debug=env_cfg.debug)
 
 
 def build_model(
@@ -35,24 +65,27 @@ def build_model(
             n_layers=model_cfg.n_layers,
             dropout=model_cfg.dropout,
             device=device,
+            max_turns=env.config.max_turns,
         )
     raise ValueError(f"Unknown model type: {model_cfg.model_type!r}")
 
-
-# =============================================================================
-# Logging
-# =============================================================================
-
-
-def save_eval_games(
-    all_game_logs: list[dict], log_dir: str = "logs/last_eval_games"
-) -> None:
-    os.makedirs(log_dir, exist_ok=True)
-    for i, game_log in enumerate(all_game_logs):
-        filepath = os.path.join(log_dir, f"game_{i:03d}.json")
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(game_log, f, indent=2)
-    print(f"Saved {len(all_game_logs)} game logs to {log_dir}/")
+# TODO: Maybe / Probably remove this!!
+def _extract_game_returns(
+    game_logs: list[Dict], env: SimpleHispaniaEnv
+) -> list[float]:
+    learner_player: Player = Player.PLAYER_1
+    game_returns: list[float] = []
+    for game_log in game_logs:
+        final_state: Dict = dict(game_log.get("final_state", {}))
+        scores: Dict = dict(final_state.get("vp_scores", {}))
+        player_scores: Dict[Player, float] = {
+            player: float(
+                sum(scores.get(nation.value, 0) for nation in nations)
+            )
+            for player, nations in env.config.player_nations.items()
+        }
+        game_returns.append(player_scores.get(learner_player, 0.0))
+    return game_returns
 
 
 # =============================================================================
@@ -61,30 +94,38 @@ def save_eval_games(
 
 
 def main() -> None:
-    orig_threads = torch.get_num_threads()
+    orig_threads: int = torch.get_num_threads()
     torch.set_num_threads(max(1, orig_threads - 1))
     torch.set_num_interop_threads(max(1, orig_threads - 1))
 
-    start_time = time.time()
-    cfg = Config()
+    cfg: Config = Config()
+    log_manager: LogManager = LogManager(cfg)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
-    print(f"Env Config:        {cfg.env}")
-    print(f"Model Config:      {cfg.model}")
-    print(f"Training Config:   {cfg.training}")
-    print(f"Evaluation Config: {cfg.evaluation}")
+    start_time: float = time.time()
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    print(
+        f"Device: {device} | Model: d_model={cfg.model.d_model}, "
+        f"layers={cfg.model.n_layers} | LR={cfg.training.lr}"
+    )
 
-    env = build_env(cfg.env)
-    model = build_model(cfg.model, env, device).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.training.lr)
+    env: SimpleHispaniaEnv = build_env(cfg.env)
+    model: torch.nn.Module = build_model(cfg.model, env, device).to(device)
+    optimizer: torch.optim.Adam = torch.optim.Adam(
+        model.parameters(), lr=cfg.training.lr
+    )
 
-    eval_history: list[dict] = []
-    trained = 0
-    total = cfg.training.num_games
-    all_game_logs: list[dict] = []
+    eval_history: list[Dict] = []
+    training_history: list[Dict] = []
+    eval_runs: list[Dict] = []
+    trained: int = 0
+    total: int = cfg.training.epochs
+    all_game_logs: list[Dict] = []
+    train_iteration: int = 0
+    optimizer_step: int = 0
+    eval_num: int = 0
+    train_cycles: int = 0
 
-    def _record_eval(episode: int, summary: dict) -> None:
+    def _record_eval(episode: int, summary: Dict) -> None:
         eval_history.append(
             {
                 "episode": episode,
@@ -95,100 +136,195 @@ def main() -> None:
             }
         )
         if cfg.evaluation.debug:
+            tie_rate: float = float(summary.get("tie_rate", 0.0))
             print(
-                f"[Eval @ {episode:4d}] "
-                f"Win Rate: {summary['win_rate']:.2%} | "
-                f"Avg Return: {summary['avg_return']:.2f} | "
-                f"Max Return: {summary['max_return']:.2f} | "
-                f"Min Return: {summary['min_return']:.2f}"
+                f"Eval @ ep{episode}: Win={summary['win_rate']:.1%} | "
+                f"Tie={tie_rate:.1%} | Ret: avg={summary['avg_return']:.1f}, "
+                f"max={summary['max_return']:.1f}, min={summary['min_return']:.1f}"
             )
 
     # Pre-training evaluation
-    summary, _ = evaluate(env, model, cfg.evaluation.num_games, device)
+    summary, _ = evaluate(
+        env,
+        model,
+        cfg.evaluation.num_games,
+        device,
+        record_all=False,
+        mcts_sims=cfg.training.mcts_sims,
+        mcts_c_puct=cfg.training.mcts_c_puct,
+        metrics_collector=None,  # Skip metrics for pre-training eval
+        eval_debug=True,
+        eval_num=0,
+    )
     _record_eval(0, summary)
+    eval_num += 1
+
+    buffer: ReplayBuffer = ReplayBuffer(max_steps=cfg.training.buffer_size)
+    agent: SimpleAgent = SimpleAgent(model, device=device, debug=cfg.training.debug)
+    
+    # Initialize metrics collector for detailed logging
+    metrics_collector = MetricsCollector(str(log_manager.get_metrics_dir()))
 
     # Training loop
+    games_played: int = 0
     while trained < total:
-        batch = min(cfg.evaluation.frequency, total - trained)
+        loop_start: float = time.perf_counter()
+        batch: int = min(cfg.training.frequency_games, total - trained)
+        self_play_time: float = 0.0
+        self_play_steps: int = 0
 
-        train_episodes(
-            cfg.training,
-            env,
-            model,
-            optimizer,
-            device,
-            num_episodes=batch,
-            start_episode=trained,
-        )
+        # =========================
+        # 1. SELF-PLAY: Data generation
+        # =========================
+        for _ in range(batch):
+            games_played += 1
+            game_start: float = time.perf_counter()
+            game_player: SelfPlayGame = SelfPlayGame(
+                env=env,
+                agent=agent,
+                device=device,
+                mcts_sims=cfg.training.mcts_sims,
+                mcts_c_puct=cfg.training.mcts_c_puct,
+                debug=cfg.training.debug,
+            )
+            examples = game_player.run()
+            self_play_time += time.perf_counter() - game_start
+            self_play_steps += len(examples)
+            buffer.add_game(examples)
+            
+            if cfg.training.debug:
+                print(
+                    f"Game {games_played}: {len(examples)} steps | "
+                    f"Buffer: {buffer.num_games} games, {len(buffer):,} steps"
+                )
+
         trained += batch
 
-        is_final_eval = trained >= total
+        # =========================
+        # 2. TRAINING: Learn from buffer
+        # =========================
+        train_start: float = time.perf_counter()
+        epoch_logs: list[Dict]
+        epoch_logs, optimizer_step = train_epoch(
+            model=model,
+            optimizer=optimizer,
+            buffer=buffer,
+            config=cfg.training,
+            env=env,
+            device=device,
+            num_epochs=cfg.training.num_train_epochs,
+            batch_size=cfg.training.batch_size,
+            metrics_collector=metrics_collector,
+            training_iteration=train_iteration,
+            optimizer_step_start=optimizer_step,
+        )
+        train_time: float = time.perf_counter() - train_start
+        for epoch_log in epoch_logs:
+            record = dict(epoch_log)
+            record["training_iteration"] = train_iteration
+            record["training_episode"] = trained
+            training_history.append(record)
+            train_iteration += 1
+        train_cycles += 1
 
-        if trained % cfg.evaluation.frequency == 0 or is_final_eval:
-            summary, logs = evaluate(
-                env,
-                model,
-                cfg.evaluation.num_games,
-                device,
-                record_all=is_final_eval,
+        # =========================
+        # 3. EVALUATION: Measure performance
+        # =========================
+        is_final_eval: bool = trained >= total
+        eval_time: float = 0.0
+
+        eval_start: float = time.perf_counter()
+        summary: Dict
+        logs: list[Dict]
+        summary, logs = evaluate(
+            env,
+            model,
+            cfg.evaluation.num_games,
+            device,
+            record_all=is_final_eval,
+            mcts_sims=cfg.training.mcts_sims,
+            mcts_c_puct=cfg.training.mcts_c_puct,
+            metrics_collector=metrics_collector,
+            eval_debug=cfg.evaluation.debug,
+            eval_num=eval_num,
+        )
+        eval_time = time.perf_counter() - eval_start
+        eval_num += 1
+
+        _record_eval(trained, summary)
+        eval_runs.append(
+            {
+                "episode": trained,
+                "summary": summary,
+                "game_returns": _extract_game_returns(logs, env),
+            }
+        )
+
+        if is_final_eval:
+            all_game_logs = logs
+
+        if cfg.training.debug:
+            loop_time: float = time.perf_counter() - loop_start
+            step_time_ms: float = (1000.0 * self_play_time / max(self_play_steps, 1))
+            print(
+                f"Timing | self_play={self_play_time:.2f}s "
+                f"(step={step_time_ms:.1f}ms) | train={train_time:.2f}s | "
+                f"eval={eval_time:.2f}s | loop={loop_time:.2f}s"
             )
 
-            _record_eval(trained, summary)
-
-            if is_final_eval:
-                all_game_logs = logs
-
-    if eval_history:
-        plot_path = plot_eval_history(eval_history, "logs/evaluation_curve.png")
-        if plot_path:
-            print(f"Saved evaluation plot to {plot_path}")
-
+    # =============================================================================
+    # SAVE ALL ARTIFACTS
+    # =============================================================================
+    
+    # Flush detailed metrics to disk
+    metrics_collector.flush()
+    
+    # Save eval games (last 10)
     if all_game_logs:
-        save_eval_games(all_game_logs)
+        log_manager.save_eval_games(all_game_logs, max_games=10)
+    
+    # Save histories
+    log_manager.save_training_history(training_history)
+    log_manager.save_eval_history(eval_history)
+    log_manager.save_eval_runs(eval_runs)
+    
+    # Save final model checkpoint
+    log_manager.save_model(model, optimizer, episode=trained, is_best=False)
+    
+    # =============================================================================
+    # GENERATE PLOTS
+    # =============================================================================
+    
+    try:
+        # Generate training loss and evaluation win-rate plots to graphs folder.
+        graphs_dir = log_manager.get_graphs_dir()
+        for old_plot in graphs_dir.glob("*.png"):
+            old_plot.unlink(missing_ok=True)
 
-    # Save trained model
-    os.makedirs("checkpoints", exist_ok=True)
-    preset = cfg.env.preset
-    model_path = f"checkpoints/model_{preset}_ep{trained}.pt"
-    torch.save(
-        {
-            "model_state": model.state_dict(),
-            "optimizer_state": optimizer.state_dict(),
-            "config": {
-                "num_tiles": env.state.num_tiles,
-                "num_nations": env.state.num_nations,
-                "d_model": cfg.model.d_model,
-                "n_heads": cfg.model.n_heads,
-                "n_layers": cfg.model.n_layers,
-                "dropout": cfg.model.dropout,
-            },
-            "episode": trained,
-        },
-        model_path,
-    )
-    print(f"Saved model checkpoint to {model_path}")
+        plots_info = plotting.generate_loss_plots(
+            training_history=training_history,
+            output_dir=graphs_dir,
+            num_train_epochs=cfg.training.num_train_epochs,
+        )
+        plots_info.update(
+            plotting.generate_evaluation_plots(
+                eval_history=eval_history,
+                output_dir=graphs_dir,
+            )
+        )
+        print(f"\n Generated {len(plots_info)} plots → {graphs_dir}/")
+    except Exception as e:
+        print(f" Plotting failed: {e}")
 
-    elapsed = time.time() - start_time
-    print(f"\nTotal runtime: {elapsed:.2f}s")
+    elapsed: float = time.time() - start_time
+    print(f"\n Training complete. Runtime: {elapsed:.1f}s")
+
+def _run_main_with_logging() -> None:
+    log_path = Path(__file__).resolve().parents[1] / "console_output.log"
+    with _tee_console_output(log_path):
+        main()
 
 
 if __name__ == "__main__":
-    main()
+    _run_main_with_logging()
 
-
-# Verificar a autoregressividade das policy heads, para ter a certeza q a proxima ação é condicionada na anterior.
-
-# Total de parametros na rede. Calcular
-
-# Treinar mais tempo.
-
-# Input e output do modelo.
-
-# FOr bigger maps the 0 is too often so it collapses the model quickly in sme episodes
-
-# TODO: Train from the checkpoint. load the grpah to continue and the model checkpoint both graphs
-
-# Pequena reward negativa por moves desnecesssarias.
-# OU mudar a delayed reward para dar metade à ultima ação do turno e a outra metade dividr pelas outras ações.
-
-# Discunted rewards de end phase para tras contribui mais as ultimas, iniciais contribui menos.
