@@ -21,6 +21,7 @@ from envs.env import SimpleHispaniaEnv
 from envs.presets.registry import get_preset
 from agents.simple_agent import SimpleAgent
 from models.simple_model import SimpleModel
+from mcts import MCTS
 
 # =============================================================================
 # Configuration & Theme
@@ -287,6 +288,17 @@ class GameVisualizer:
         self.theme = Theme()
         self.agent = agent
         self.device = "cpu"
+        self.mcts: Optional[MCTS] = None
+        
+        # Initialize MCTS if agent is loaded
+        if self.agent is not None:
+            self.mcts = MCTS(
+                agent=self.agent,
+                c_puct=1.0,
+                device=self.device,
+                root_dirichlet_eps=0.0,
+                debug=False,
+            )
 
         pygame.init()
 
@@ -411,6 +423,10 @@ class GameVisualizer:
         # Print value head output if model is available
         if self.agent is not None:
             self._print_model_head_outputs()
+        
+        # Print MCTS tree for all actions if model is available
+        # if self.mcts is not None:
+        #     self._print_mcts_tree_for_all_actions()
 
     def _build_policy_masks(self, state: GameState) -> dict[str, torch.Tensor]:
         """Build the same legality masks the agent uses when sampling actions."""
@@ -419,7 +435,7 @@ class GameVisualizer:
         )
         env.state = state
 
-        unit_feats, unit_id_to_index, index_to_unit_id = self.agent.build_unit_feats(
+        unit_feats, index_to_unit_id = self.agent.build_unit_feats(
             state
         )
         num_tiles = state.num_tiles
@@ -430,7 +446,7 @@ class GameVisualizer:
 
         if num_units > 0:
             masks["unit"] = env.get_unit_mask_for_move(
-                unit_id_to_index, num_units, self.device
+                index_to_unit_id, num_units, self.device
             ).unsqueeze(0)
         else:
             masks["unit"] = torch.full((1, 0), float("-inf"), device=self.device)
@@ -474,13 +490,17 @@ class GameVisualizer:
             tile_feats = self.agent.build_tile_feats(
                 state, self.data.preset_config.reward_tiles, state.num_nations
             )
-            unit_feats, unit_id_to_index, index_to_unit_id = (
-                self.agent.build_unit_feats(state)
-            )
+            unit_feats, index_to_unit_id = self.agent.build_unit_feats(state)
 
             batch_size = global_feats.size(0)
             num_tiles = tile_feats.size(1)
             num_units = unit_feats.size(1) if unit_feats is not None else 0
+            
+            # Build unit_id_to_index mapping
+            unit_id_to_index = {
+                uid: idx
+                for idx, uid in enumerate(index_to_unit_id)
+            }
             masks = self._build_policy_masks(state)
 
             # Forward pass through transformer to get embeddings
@@ -678,6 +698,77 @@ class GameVisualizer:
 
             traceback.print_exc()
             print(f"[ERROR] Failed to compute policy head: {e}")
+
+    def _print_mcts_tree_for_all_actions(self) -> None:
+        """Print MCTS debug tree for all actions in the replay."""
+        if self.mcts is None or self.agent is None:
+            return
+
+        try:
+            from envs.core.enums import Player
+            
+            state_before = self.data.states[self.current_index]
+            
+            if state_before.current_nation is None:
+                return
+            
+            # Run MCTS for this state regardless of player
+            print(f"\n{'='*90}")
+            print(f"[State {self.current_index}] MCTS ANALYSIS ({state_before.current_nation.name})")
+            print(f"{'='*90}")
+            
+            try:
+                from envs.env import SimpleHispaniaEnv
+                import copy
+                
+                # Create temp env
+                temp_env = SimpleHispaniaEnv(preset=self.data.preset, debug=False)
+                temp_env.state = state_before
+                
+                # Create MCTS instance (no need for debug=True now)
+                mcts_debug = MCTS(
+                    agent=self.agent,
+                    c_puct=1.0,
+                    device=self.device,
+                    root_dirichlet_eps=0.0,
+                    debug=False,
+                )
+                
+                # Run limited simulations to analyze
+                mcts_debug.reset()
+                action_counts, chosen_action = mcts_debug.run(
+                    env=temp_env,
+                    n_simulations=32,
+                    is_deterministic=True,
+                )
+                
+                # Print detailed diagnostics
+                if chosen_action is not None and mcts_debug._pending_root is not None:
+                    turn_number = getattr(state_before, 'turn_number', self.current_index)
+                    mcts_debug.print_mcts_diagnostics(
+                        root=mcts_debug._pending_root,
+                        chosen_action=chosen_action,
+                        state=state_before,
+                        turn_number=turn_number,
+                    )
+                
+                # Compare with actual action
+                actual_action = None
+                if self.current_index > 0 and self.current_index - 1 < len(self.data.actions):
+                    actual_action = self.data.actions[self.current_index - 1]
+                
+                print(f"ACTUAL ACTION TAKEN : {actual_action}")
+                print(f"MCTS RECOMMENDED   : {chosen_action}")
+                print(f"ALIGNMENT          : {'✓ YES' if actual_action == chosen_action else '✗ NO'}")
+                print(f"{'='*90}\n")
+                
+            except Exception as e:
+                print(f"[DEBUG] MCTS analysis failed: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        except Exception as e:
+            print(f"[WARN] Failed to print MCTS analysis: {e}")
 
     def _handle_events(self) -> None:
         max_idx = len(self.data.states) - 1
@@ -920,6 +1011,95 @@ class GameVisualizer:
         shade_index = self._nation_shade_index(nation)
         return self.theme.nation_color(player_id, shade_index)
 
+    def _evaluate_model_at_state(self, state: GameState) -> Dict[str, float]:
+        """Evaluate the model at the given state and return value predictions."""
+        if self.agent is None:
+            return {}
+        
+        try:
+            # Build model inputs from the state
+            from envs.env import SimpleHispaniaEnv
+            
+            # Create a temporary env to use agent's input builder
+            temp_env = SimpleHispaniaEnv(preset=self.data.preset, debug=False)
+            temp_env.state = state
+            
+            # Build model inputs
+            g, t, u, masks, _ = self.agent.build_model_inputs_and_masks(temp_env)
+            
+            # Run model forward pass
+            model = self.agent.model
+            with torch.no_grad():
+                out = model(
+                    g.to(self.device),
+                    t.to(self.device),
+                    u.to(self.device),
+                    masks=masks,
+                )
+                value_logits = out["value"].squeeze(0)  # (num_nations,)
+            
+            # Convert to human-readable format
+            result = {}
+            for nation in self.data.preset_config.turn_order:
+                nation_idx = list(self.data.preset_config.turn_order).index(nation)
+                value = float(value_logits[nation_idx].item())
+                result[nation.name] = value
+            
+            return result
+        except Exception as e:
+            print(f"[WARN] Failed to evaluate model at state: {e}")
+            return {}
+
+    def _run_mcts_from_state(self, state: GameState, num_sims: int = 32, print_diagnostics: bool = True) -> Dict[str, Tuple[Action, int]]:
+        """Run MCTS from current state and return visit counts per action."""
+        if self.mcts is None or self.agent is None:
+            return {}
+        
+        try:
+            from envs.env import SimpleHispaniaEnv
+            
+            # Create a temporary env at the current state
+            temp_env = SimpleHispaniaEnv(preset=self.data.preset, debug=False)
+            temp_env.state = state
+            
+            # Reset MCTS and run simulations
+            self.mcts.reset()
+            action_counts, chosen_action = self.mcts.run(
+                env=temp_env,
+                n_simulations=num_sims,
+                is_deterministic=True,
+            )
+            
+            # Print diagnostics if requested and we have the pending root
+            if print_diagnostics and chosen_action is not None and self.mcts._pending_root is not None:
+                turn_number = getattr(state, 'turn_number', 0)
+                self.mcts.print_mcts_diagnostics(
+                    root=self.mcts._pending_root,
+                    chosen_action=chosen_action,
+                    state=state,
+                    turn_number=turn_number,
+                )
+            
+            # Convert to readable format
+            total = sum(action_counts.values())
+            result = {}
+            for action, count in sorted(action_counts.items(), key=lambda x: x[1], reverse=True)[:5]:
+                visit_pct = (count / total * 100) if total > 0 else 0
+                result[str(action)] = (action, count, visit_pct)
+            
+            return result
+        except Exception as e:
+            print(f"[WARN] Failed to run MCTS: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
+
+    def _get_action_for_state(self, state_idx: int) -> Optional[Action]:
+        """Get the action taken from the given state index."""
+        if state_idx == 0 or state_idx - 1 >= len(self.data.actions):
+            return None
+        return self.data.actions[state_idx - 1]
+
     def _render_panel(self, state: GameState, hover_tile: Optional[int]) -> None:
         px = self.map_w + 18
         y = 22
@@ -1007,6 +1187,7 @@ class GameVisualizer:
         y += 12
 
         y = self._label_value(px, y, "LAST ACTION", self._action_text())
+        y += 6
 
         # Edge legend.
         pygame.draw.line(
@@ -1260,11 +1441,11 @@ def main() -> None:
             # Recreate model using saved hyperparameters
             preset_config = game_data.preset_config
             model = SimpleModel(
-                num_tiles=saved_config.get("num_tiles"),
-                num_nations=saved_config.get("num_nations"),
-                d_model=saved_config.get("d_model", 128),
+                num_tiles=preset_config.build_board().__len__(),
+                num_nations=len(preset_config.turn_order),
+                d_model=saved_config.get("d_model", 256),
                 n_heads=saved_config.get("n_heads", 4),
-                n_layers=saved_config.get("n_layers", 2),
+                n_layers=saved_config.get("n_layers", 4),
                 dropout=saved_config.get("dropout", 0.1),
                 device="cpu",
                 max_turns=saved_config.get("max_turns", preset_config.max_turns),

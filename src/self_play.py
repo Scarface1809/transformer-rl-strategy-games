@@ -58,21 +58,26 @@ class SelfPlayGame:
             
             acting_nation: Nation | None = self.env.state.current_nation
             if acting_nation is None:
-                print("Warning: Acting nation is None during self-play. This should not happen. Skipping this step.")
-                break
+                raise RuntimeError(
+                    "Acting nation is None during self-play. This should not happen during valid gameplay."
+                )
             
             # 2. Run MCTS and simulate to get visit counts and chosen action
             action_counts, chosen_action = self.mcts.run(env=self.env, n_simulations=self.mcts_sims, is_deterministic=False)
 
             if chosen_action is None:
-                print("Warning: No action was chosen during MCTS. This may indicate a problem with the environment or the model. Ending self-play early.")
-                break
+                raise RuntimeError(
+                    "MCTS returned None for chosen action. This indicates no legal actions found, "
+                    "which should not happen during valid gameplay."
+                )
 
             # 3. Convert visit counts to policy targets
             total = float(sum(action_counts.values()))
             if total == 0:
-                print("Warning: Total visit counts from MCTS is zero. This may indicate a problem with the environment or the model. Ending self-play early.")
-                break
+                raise RuntimeError(
+                    "Total visit counts from MCTS is zero. This indicates MCTS simulation failed to visit any actions, "
+                    "which should not happen during valid gameplay."
+                )
             
             mcts_pi: Dict[Action, float] = {
                 a: c / total for a, c in action_counts.items()
@@ -94,6 +99,7 @@ class SelfPlayGame:
 
             # 4. Execute action in real environment
             _, rewards = self.env.step(chosen_action)
+            self.mcts.confirm_step(self.env.state)
             raw_immediate_rewards.append(rewards)
             game_actions.append(chosen_action)
             step_in_game += 1

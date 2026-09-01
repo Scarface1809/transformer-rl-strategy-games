@@ -5,7 +5,7 @@ from typing import Dict, List
 import torch
 
 from envs.core.entities import Action, GameState, Unit, UnitStats, Roster
-from envs.core.enums import ActionType, Nation, Phase, UnitType
+from envs.core.enums import ActionType, Nation, Phase, UnitType, TerrainType
 from envs.presets.config import PresetConfig
 from envs.presets.registry import get_preset
 
@@ -311,14 +311,6 @@ class SimpleHispaniaEnv:
             )
             return {}
 
-        if stats is None:
-            print(
-                f"Warning: unit {unit_name} not purchasable for {nation} with "
-                f"{self.state.pop_points.get(nation, 0)} pop points and "
-                f"current supply"
-            )
-            return {}
-
         # --- EFFECTS ---
         self.state.pop_points[nation] -= stats.cost
         self._spawn_unit(tile_id, nation, stats)
@@ -451,7 +443,7 @@ class SimpleHispaniaEnv:
 
         losses: Dict[Nation, int] = {n: 0 for n in nation_groups.keys()}
 
-        def _apply_hits(rolls: List[int], targets: List[Unit], side_label: str) -> None:
+        def _apply_hits(rolls: List[int], targets: List[Unit], side_label: str, apply_terrain_defense: bool = False) -> None:
             rolls.sort(reverse=True)
             targets.sort(key=lambda u: u.stats.to_kill, reverse=True)
             if self.debug:
@@ -464,7 +456,13 @@ class SimpleHispaniaEnv:
                 for target in targets:
                     if not target.alive:
                         continue
-                    if roll >= target.stats.to_kill:
+                    # Mountain terrain gives defensive bonus only for defending units: minimum 6 to be killed
+                    tile_terrain = self.state.tiles[target.tile].terrain
+                    effective_to_kill = target.stats.to_kill
+                    if apply_terrain_defense and tile_terrain == TerrainType.MOUNTAIN:
+                        effective_to_kill = max(effective_to_kill, 6)
+                    
+                    if roll >= effective_to_kill:
                         before_hp = target.current_hit_points
                         target.current_hit_points -= 1
                         applied = True
@@ -473,14 +471,14 @@ class SimpleHispaniaEnv:
                         if self.debug:
                             print(
                                 f"    roll {roll} hits U{target.id} ({target.nation.name}) "
-                                f"TK={target.stats.to_kill} HP {before_hp}->{target.current_hit_points}"
+                                f"TK={target.stats.to_kill}{'->6(MOUNTAIN)' if apply_terrain_defense and tile_terrain == TerrainType.MOUNTAIN else ''} HP {before_hp}->{target.current_hit_points}"
                             )
                         break
                 if self.debug and not applied:
                     print(f"    roll {roll} found no valid target")
 
-        _apply_hits(attacker_hits, defender_units, f"attacker {attacker_nation.name}")
-        _apply_hits(defender_hits, attacker_units, "defenders")
+        _apply_hits(attacker_hits, defender_units, f"attacker {attacker_nation.name}", apply_terrain_defense=True)
+        _apply_hits(defender_hits, attacker_units, "defenders", apply_terrain_defense=False)
 
         units_on_tile = self.state.units_on_tile(tile_id)
         alive_nations = {u.nation for u in units_on_tile if u.alive}

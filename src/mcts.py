@@ -12,19 +12,22 @@ import torch
 from agents.simple_agent import SimpleAgent
 from envs.env import SimpleHispaniaEnv
 from envs.core.entities import Action, GameState, Nation
+from envs.core.enums import ActionType
 
 class Node:
     def __init__(self, debug: bool = False):
         self.children: dict[Action, Node] = {}
+        self.chance_children: dict[Action, dict[str, Node]] = {}  # RESOLVE_BATTLE only: action -> {outcome_fp -> Node}
         self.N: dict[Action, int] = {}
-        self.W: dict[Action, float] = {}
+        self.W: dict[Action, dict[Nation, float]] = {}    # Full value vector for all nations per action
         self.P: dict[Action, float] = {}
         self.is_expanded: bool = False
         self.is_terminal = False    # Mostly for debugging, not used in MCTS logic
         self.debug = debug
     
-    def UCB(self, action: Action, c_puct: float) -> float:
-        q = self.Q(action)
+    def UCB(self, action: Action, c_puct: float, nation: Nation) -> float:
+        """Compute UCB value for an action from a specific nation's perspective."""
+        q = self.Q(action, nation)
         u = self.U(action, c_puct)
         return q + u
 
@@ -34,25 +37,41 @@ class Node:
         u = c_puct * p * (math.sqrt(sum(self.N.values()) + 1e-8) / (1 + n))
         return u
 
-    def Q(self, action: Action) -> float:
+    def Q(self, action: Action, nation: Nation | None = None) -> float | dict[Nation, float]:
+        """Get Q-value(s) for an action.
+        
+        Args:
+            action: The action to evaluate
+            nation: If provided, return Q value for that nation only (as float)
+                   If None, return full dict of Q values for all nations
+        
+        Returns:
+            If nation is provided: Q value (float) for that nation
+            If nation is None: dict[Nation, float] with Q values for all nations
+        """
         n = self.N.get(action, 0)
         if n == 0:
-            return 0.0
-        return self.W.get(action, 0.0) / n
+            if nation is not None:
+                return 0.0
+            return {}
+        
+        w_dict = self.W.get(action, {})
+        if nation is not None:
+            return float(w_dict.get(nation, 0.0)) / n
+        else:
+            return {nat: float(w_dict.get(nat, 0.0)) / n for nat in w_dict.keys()}
 
     def expand(self, priors: dict[Action, float]) -> None:
         if not priors:
-            self.is_expanded = False
-            self.P = {}
-            self.N = {}
-            self.W = {}
-            print("Warning: Attempted to expand a node with empty priors. This may indicate a problem with the environment or the model.")
-            return
+            raise RuntimeError(
+                "Attempted to expand a MCTS node with empty priors. "
+                "This indicates no legal actions exist, which should not happen during valid gameplay."
+            )
         self.P = priors
         self.is_expanded = True
         for a in priors:
             self.N[a] = 0
-            self.W[a] = 0.0
+            self.W[a] = {}  # Initialize as empty dict for all nations' values
 
     def is_leaf(self) -> bool:
         return not self.is_expanded
@@ -78,9 +97,13 @@ class MCTS:
         self.device = device
         self.root: Node | None = None
         self._expected_root_fp: str | None = None  # fingerprint self.root should match
+        self._pending_root: Node | None = None  # Root awaiting confirmation after real step
+        self._pending_action: Action | None = None  # Action taken, awaiting confirmation
         self.root_dirichlet_alpha = root_dirichlet_alpha
         self.root_dirichlet_eps = root_dirichlet_eps
         self.debug = debug
+        self._last_root_network_values: dict[Nation, float] = {}  # Store network values from root eval
+        self._last_root_network_policy: dict[Action, float] = {}  # Store network policy (priors)
 
     def _print_tree(
         self,
@@ -125,6 +148,15 @@ class MCTS:
 
         for i, action in enumerate(actions):
             child = node.children.get(action)
+            
+            # Get W dict and format it for display
+            w_dict = node.W.get(action, {})
+            # Show first nation's value for compact display
+            first_nation = list(w_dict.keys())[0] if w_dict else None
+            w_repr = f"{w_dict.get(first_nation, 0.0):.1f}" if first_nation else "0.0"
+            
+            # Get Q value for first nation
+            q_val = node.Q(action, first_nation) if first_nation else 0.0
 
             if child is None:
                 print(
@@ -132,16 +164,16 @@ class MCTS:
                     + ("└── " if i == len(actions)-1 else "├── ")
                     + f"{action}"
                     + f"  N={node.N[action]}"
-                    + f"  W={node.W[action]:.3f}"
-                    + f"  Q={node.Q(action):.3f}"
+                    + f"  W={w_repr}"
+                    + f"  Q={q_val:.3f}"
                     + f"  P={node.P[action]:.3f}"
                     + "   [UNEXPANDED]"
                 )
                 continue
 
             child.parent_N = node.N[action]
-            child.parent_W = node.W[action]
-            child.parent_Q = node.Q(action)
+            child.parent_W = w_repr
+            child.parent_Q = q_val
             child.parent_P = node.P[action]
 
             self._print_tree(
@@ -178,8 +210,11 @@ class MCTS:
         )
         
         if not legal_actions:
-            print("Warning: No legal actions available during MCTS evaluation. Returning default values. This is an error.")
-            return {}, {}
+            raise RuntimeError(
+                f"MCTS evaluation encountered a state with no legal actions. "
+                f"This should not happen during valid gameplay. "
+                f"State: {env.state.to_dict()}"
+            )
 
         model = self.agent.model
         with torch.no_grad():
@@ -190,77 +225,77 @@ class MCTS:
                 masks=masks,
             )
 
-            at_log_probs: torch.Tensor = model.checked_log_softmax(out["action_type_logits"], name="action_type",).squeeze(0)
-            unit_log_probs: torch.Tensor = model.checked_log_softmax(out["unit_logits"], name="unit",).squeeze(0)
-            unit_type_log_probs: torch.Tensor = model.checked_log_softmax(out["unit_type_logits"], name="unit_type",).squeeze(0)
-            tile_log_probs: torch.Tensor = model.checked_log_softmax(out["tile_logits"], name="tile",).squeeze(0)
+        at_log_probs: torch.Tensor = model.checked_log_softmax(out["action_type_logits"], name="action_type",).squeeze(0)
+        unit_log_probs: torch.Tensor = model.checked_log_softmax(out["unit_logits"], name="unit",).squeeze(0)
+        unit_type_log_probs: torch.Tensor = model.checked_log_softmax(out["unit_type_logits"], name="unit_type",).squeeze(0)
+        tile_log_probs: torch.Tensor = model.checked_log_softmax(out["tile_logits"], name="tile",).squeeze(0)
 
-            log_probs_list: list[float] = []
+        log_probs_list: list[float] = []
+        
+        # Mapping from unit_id to index in the unit features tensor
+        unit_id_to_index = {
+            unit_id: idx
+            for idx, unit_id in enumerate(index_to_unit_id)
+        }
+
+        for action in legal_actions:
+            at_idx = action.type.value
+            unit_idx = -1
+            if action.unit_id is not None:
+                if action.unit_id in unit_id_to_index:
+                    unit_idx = unit_id_to_index[action.unit_id]
+
+            unit_type_idx = -1
+            if getattr(action, "unit_type", None) is not None:
+                unit_type_idx = int(action.unit_type.value)
+
+            tile_idx = action.target_tile if action.target_tile is not None else -1
+
+            if not (0 <= at_idx < at_log_probs.numel()):
+                log_probs_list.append(-float("inf"))
+                continue
+
+            logp: float = float(at_log_probs[at_idx].item())
+
+            if unit_idx >= 0:
+                if 0 <= unit_idx < unit_log_probs.numel():
+                    logp += float(unit_log_probs[unit_idx].item())
+                else:
+                    logp = -float("inf")
+
+            if unit_type_idx >= 0:
+                if 0 <= unit_type_idx < unit_type_log_probs.numel():
+                    logp += float(unit_type_log_probs[unit_type_idx].item())
+                else:
+                    logp = -float("inf")
+
+            if tile_idx >= 0:
+                tile_unit_idx = unit_idx if unit_idx >= 0 else 0
+                tile_shape = tile_log_probs.shape
+                if (
+                    0 <= at_idx < tile_shape[0]
+                    and 0 <= tile_unit_idx < tile_shape[1]
+                    and 0 <= tile_idx < tile_shape[2]
+                ):
+                    logp += float(
+                        tile_log_probs[at_idx, tile_unit_idx, tile_idx].item()
+                    )
+                else:
+                    logp = -float("inf")
             
-            # Mapping from unit_id to index in the unit features tensor
-            unit_id_to_index = {
-                unit_id: idx
-                for idx, unit_id in enumerate(index_to_unit_id)
-            }
+            log_probs_list.append(logp)
 
-            for action in legal_actions:
-                at_idx = action.type.value
-                unit_idx = -1
-                if action.unit_id is not None:
-                    if action.unit_id in unit_id_to_index:
-                        unit_idx = unit_id_to_index[action.unit_id]
-
-                unit_type_idx = -1
-                if getattr(action, "unit_type", None) is not None:
-                    unit_type_idx = int(action.unit_type.value)
-
-                tile_idx = action.target_tile if action.target_tile is not None else -1
-
-                if not (0 <= at_idx < at_log_probs.numel()):
-                    log_probs_list.append(-float("inf"))
-                    continue
-
-                logp: float = float(at_log_probs[at_idx].item())
-
-                if unit_idx >= 0:
-                    if 0 <= unit_idx < unit_log_probs.numel():
-                        logp += float(unit_log_probs[unit_idx].item())
-                    else:
-                        logp = -float("inf")
-
-                if unit_type_idx >= 0:
-                    if 0 <= unit_type_idx < unit_type_log_probs.numel():
-                        logp += float(unit_type_log_probs[unit_type_idx].item())
-                    else:
-                        logp = -float("inf")
-
-                if tile_idx >= 0:
-                    tile_unit_idx = unit_idx if unit_idx >= 0 else 0
-                    tile_shape = tile_log_probs.shape
-                    if (
-                        0 <= at_idx < tile_shape[0]
-                        and 0 <= tile_unit_idx < tile_shape[1]
-                        and 0 <= tile_idx < tile_shape[2]
-                    ):
-                        logp += float(
-                            tile_log_probs[at_idx, tile_unit_idx, tile_idx].item()
-                        )
-                    else:
-                        logp = -float("inf")
-                
-                log_probs_list.append(logp)
-
-            log_probs: torch.Tensor = torch.tensor(log_probs_list, device=self.device)
-            
-            finite: torch.Tensor = torch.isfinite(log_probs)
-            if finite.any():
-                max_val: torch.Tensor = torch.max(log_probs[finite])
-                stabilized: torch.Tensor = log_probs - max_val
-                probs: torch.Tensor = torch.nn.functional.softmax(stabilized, dim=0)
-                probs = torch.where(finite, probs, torch.zeros_like(probs))
-                probs_list: list[float] = probs.detach().cpu().tolist()
-            else:
-                probs_list: list[float] = [1.0 / len(legal_actions)] * len(legal_actions)
+        log_probs: torch.Tensor = torch.tensor(log_probs_list, device=self.device)
+        
+        finite: torch.Tensor = torch.isfinite(log_probs)
+        if finite.any():
+            max_val: torch.Tensor = torch.max(log_probs[finite])
+            stabilized: torch.Tensor = log_probs - max_val
+            probs: torch.Tensor = torch.nn.functional.softmax(stabilized, dim=0)
+            probs = torch.where(finite, probs, torch.zeros_like(probs))
+            probs_list: list[float] = probs.detach().cpu().tolist()
+        else:
+            probs_list: list[float] = [1.0 / len(legal_actions)] * len(legal_actions)
 
         priors: dict[Action, float] = {
             action: float(prob)
@@ -279,6 +314,8 @@ class MCTS:
         """Call this at the start of every new episode/game."""
         self.root = None
         self._expected_root_fp = None
+        self._pending_root = None
+        self._pending_action = None
 
     def run(
         self, 
@@ -312,15 +349,20 @@ class MCTS:
             print("=" * 90)
 
         if root is None:
-            priors, _ = self._eval(env)
+            priors, values = self._eval(env)
             if not priors:
-                print("Warning: No priors returned from network evaluation. Returning empty counts and None for chosen action.")
-                return {}, None
+                raise RuntimeError(
+                    "Network evaluation returned no action priors. "
+                    "This indicates no legal actions exist or model failed to produce outputs."
+                )
+            # Store network values and policy for diagnostics
+            self._last_root_network_values = values
+            self._last_root_network_policy = priors
             root = Node(debug=self.debug)
             root.expand(priors)
 
-        # Add Dirichlet noise at root for exploration
-        if self.root_dirichlet_eps and self.root_dirichlet_alpha and root.P:
+        # Add Dirichlet noise at root for exploration only for training.
+        if (not is_deterministic and self.root_dirichlet_eps and self.root_dirichlet_alpha and root.P):
             keys: list[Action] = list(root.P.keys())
             vals: list[float] = [root.P[k] for k in keys]
             noise = np.random.default_rng().dirichlet(
@@ -336,6 +378,9 @@ class MCTS:
         # MCTS simulations: pure tree search using network priors
         for _ in range(n_simulations):
             sim_env = copy.deepcopy(env)
+            # Reset the RNG for the simulation to ensure reproducibility and independence from the main environment's RNG state.
+            sim_seed = int(np.random.randint(0, 1_000_000_000))
+            sim_env.rng = np.random.default_rng(sim_seed)
 
             node: Node = root
             path: list[tuple[Node, Action, Nation | None, dict[Nation, float]]] = []
@@ -346,7 +391,7 @@ class MCTS:
             # Selection + Expansion
             while node.is_expanded:
 
-                action = max(node.P.keys(), key=lambda a: node.UCB(a, self.c_puct))
+                action = max(node.P.keys(), key=lambda a: node.UCB(a, self.c_puct, sim_env.state.current_nation))
 
                 debug_path.append(action)
 
@@ -354,10 +399,17 @@ class MCTS:
                 _, rewards = sim_env.step(action)
                 path.append((node, action, acting_nation, rewards))
 
-                if action not in node.children:
-                    node.children[action] = Node(debug=self.debug)
-                
-                node = node.children[action]
+                if action.type == ActionType.RESOLVE_BATTLE:
+                    # Chance node: route by the actual sampled outcome, not by action alone.
+                    outcome_fp = state_fingerprint(sim_env.state)
+                    outcomes = node.chance_children.setdefault(action, {})
+                    if outcome_fp not in outcomes:
+                        outcomes[outcome_fp] = Node(debug=self.debug)
+                    node = outcomes[outcome_fp]
+                else:
+                    if action not in node.children:
+                        node.children[action] = Node(debug=self.debug)
+                    node = node.children[action]
 
                 depth += 1
 
@@ -377,13 +429,15 @@ class MCTS:
                 
                 node.expand(priors)
 
-            # Backup
+            # Backup MAX-N style: each player maximizes their own VP score. Change later to tets different scenarios #TODO
             G: dict[Nation, float] = value.copy()
             for nd, action, acting_nation, rewards in reversed(path):
                 for nation, reward in rewards.items():
                     G[nation] = G.get(nation, 0.0) + float(reward)
                 nd.N[action] += 1
-                nd.W[action] += G[acting_nation] # MaxN-style backup (Maximize my own VP score)
+                # Store full value vector for all nations
+                for nation, g_val in G.items():
+                    nd.W[action][nation] = nd.W[action].get(nation, 0.0) + float(g_val)
             
         # Action Selection
         if not root.N:
@@ -422,40 +476,125 @@ class MCTS:
             print("=" * 90)
             print(f"Chosen action : {chosen}")
             print(f"Visits        : {counts[chosen]}")
-            print(f"Q-value       : {root.Q(chosen):.3f}")
+            # Print Q-values for all nations
+            q_dict = root.Q(chosen)
+            if isinstance(q_dict, dict):
+                for nation, q_val in sorted(q_dict.items(), key=lambda x: x[0].name):
+                    print(f"  {nation.name:12s}: Q={q_val:7.3f}")
             print("=" * 90)
 
-        # The outocme of the chosen action via the step.
-        expected_env = copy.deepcopy(env)   # Another deepcopy is pretty costly...
-        expected_env.step(chosen)
-        self._expected_root_fp = state_fingerprint(expected_env.state)
-
-        
-        new_root = root.children.get(chosen)
+        # Defer tree reuse until we know the real outcome from caller.
+        # This is necessary for stochastic actions like RESOLVE_BATTLE.
+        self._pending_root = root
+        self._pending_action = chosen
+        self.root = None
+        self._expected_root_fp = None
 
         if self.debug:
             print()
             print("=" * 90)
             print("TREE REUSE")
             print("=" * 90)
-
-            print(f"Old root id      : {id(root)}")
-            print(f"Chosen action    : {chosen}")
-
-            if new_root is None:
-                print("Chosen branch was never expanded during search.")
-                print("Next search will start from a fresh root.")
-            else:
-                print(f"New root id      : {id(new_root)}")
-                print("Subtree retained")
-                print(f"Discarded branches : {len(root.children) - 1}")
-                print(f"Children kept      : {len(new_root.children)}")
-
+            print("Root reuse deferred until confirm_step() is called with the real outcome.")
             print("=" * 90)
 
-        self.root = new_root if new_root is not None else None
-
         return counts, chosen
+
+    def confirm_step(self, resulting_state: GameState) -> None:
+        """Call once, right after applying the action `run()` returned to the real
+        environment, passing the real resulting state. Lets MCTS reuse the matching subtree
+        next time instead of always rebuilding."""
+        if self._pending_root is None:
+            return
+
+        fp = state_fingerprint(resulting_state)
+        action = self._pending_action
+
+        if action.type == ActionType.RESOLVE_BATTLE:
+            outcomes = self._pending_root.chance_children.get(action, {})
+            self.root = outcomes.get(fp)
+        else:
+            self.root = self._pending_root.children.get(action)
+
+        self._expected_root_fp = fp if self.root is not None else None
+        self._pending_root = None
+        self._pending_action = None
+
+    def print_mcts_diagnostics(
+        self, 
+        root: Node,
+        chosen_action: Action,
+        state: GameState,
+        turn_number: int = 0,
+    ) -> None:
+        """Pretty-print MCTS decision diagnostics.
+        
+        Shows network values, policy, legal actions with Q/N/P stats, and selected action.
+        """
+        print("\n" + "=" * 90)
+        print(f"STATE {turn_number}")
+        acting_nation = state.current_nation
+        print(f"Nation: {acting_nation.name if acting_nation else 'UNKNOWN'}")
+        print(f"Phase: {state.phase.name if hasattr(state, 'phase') else 'UNKNOWN'}")
+        
+        # VALUE HEAD
+        print("\nVALUE HEAD:")
+        if self._last_root_network_values:
+            for nation, value in sorted(self._last_root_network_values.items(), key=lambda x: x[0].name):
+                print(f"    {nation.name:12s}: {value:6.2f}")
+        
+        # NETWORK POLICY
+        print("\nNETWORK POLICY:")
+        if self._last_root_network_policy:
+            sorted_actions = sorted(
+                self._last_root_network_policy.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )
+            for action, prior in sorted_actions[:10]:  # Top 10
+                pct = prior * 100
+                print(f"    {str(action):30s}: {pct:5.1f}%")
+        
+        # LEGAL ACTIONS
+        print("\nLEGAL ACTIONS:")
+        legal_actions = root.P.keys() if root and root.P else []
+        for action in legal_actions:
+            action_str = str(action)
+            # Abbreviate if too long
+            if len(action_str) > 30:
+                action_str = action_str[:27] + "..."
+            print(f"    {action_str}")
+        
+        # MCTS STATS
+        print("\nMCTS:")
+        print(f"    {'Action':30s}  {'Prior':>7s}  {'Visits':>7s}")
+        if root and root.P:
+            sorted_actions = sorted(
+                legal_actions,
+                key=lambda a: root.N.get(a, 0),
+                reverse=True
+            )
+            for action in sorted_actions:
+                action_str = str(action)
+                if len(action_str) > 30:
+                    action_str = action_str[:27] + "..."
+                
+                prior = root.P.get(action, 0.0)
+                visits = root.N.get(action, 0)
+                
+                print(f"    {action_str:30s}  {prior:7.3f}  {visits:7d}")
+                
+                # Print Q values for all nations
+                q_values = root.Q(action)
+                if isinstance(q_values, dict):
+                    for nation, q_val in sorted(q_values.items(), key=lambda x: x[0].name):
+                        print(f"        {nation.name:12s}: Q={q_val:7.3f}")
+        
+        # SELECTED
+        print(f"\nSELECTED:")
+        action_str = str(chosen_action)
+        print(f"    {action_str}")
+        print("=" * 90 + "\n")
 
 
 # TODO: CHECK EVAL AND TRAIN MODE BEFORE AND AFTER EVAL AND TRAIN OBVIOUSLY....

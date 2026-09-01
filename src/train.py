@@ -25,8 +25,6 @@ def train_epoch(
     device: str,
     num_epochs: int,
     batch_size: int,
-    metrics_collector: MetricsCollector | None = None,
-    training_iteration: int = 0,
     optimizer_step_start: int = 0,
 ) -> tuple[list[Dict[str, float]], int]:
     model.train()
@@ -52,8 +50,7 @@ def train_epoch(
 
             policy_losses: list[torch.Tensor] = []
             values_list: list[torch.Tensor] = []
-            value_targets_list: list[float] = []
-            actors_list: list[int] = []
+            value_targets_rows: list[list[float]] = []
 
             for i, example in enumerate(batch):
                 # Forward pass
@@ -87,31 +84,26 @@ def train_epoch(
                     loss_policy += -p * logp
                 policy_losses.append(loss_policy)
 
-                # VP gain target for this state
-                target: float = example.value.get(example.acting_nation, 0.0)
-                value_targets_list.append(target)
-                actors_list.append(nation_to_idx[example.acting_nation])
+                # VP gain target for this state across all playing nations
+                value_targets_rows.append(
+                    [
+                        float(example.value.get(nation, 0.0))
+                        for nation in playing_nations
+                    ]
+                )
 
             # Stack for batch processing
             policy_losses_batch: torch.Tensor = torch.stack(policy_losses)
             values_batch: torch.Tensor = torch.stack(values_list)
 
-            # Extract value for acting player
-            actors_tensor: torch.Tensor = torch.tensor(
-                actors_list, device=device, dtype=torch.long
-            )
-            values_acting: torch.Tensor = values_batch.gather(
-                1, actors_tensor.unsqueeze(1)
-            ).squeeze(1)
-
             targets_tensor: torch.Tensor = torch.tensor(
-                value_targets_list, device=device, dtype=torch.float32
+                value_targets_rows, device=device, dtype=torch.float32
             )
 
             # Loss components: keep it simple and standard
             loss_policy: torch.Tensor = policy_losses_batch.mean()
             loss_value: torch.Tensor = F.mse_loss(
-                values_acting,
+                values_batch,
                 targets_tensor,
             )
 
@@ -165,30 +157,6 @@ def train_epoch(
                 max_norm=config.max_grad_norm,
             )
             optimizer.step()
-
-            # Log detailed metrics if collector is provided
-            if metrics_collector is not None:
-                # Log training step (batch-level)
-                metrics_collector.log_training_step(
-                    iteration=optimizer_step,
-                    policy_loss=loss_policy.item(),
-                    value_loss=loss_value.item(),
-                    grad_norm_policy=float(grad_norm_policy),
-                    grad_norm_value=float(grad_norm_value),
-                    grad_norm_raw=grad_norm_raw,
-                    grad_norm_clipped=float(grad_norm_clipped.item() if isinstance(grad_norm_clipped, torch.Tensor) else grad_norm_clipped),
-                )
-                
-                # Log example-level metrics (value head calibration)
-                for i in range(len(value_targets_list)):
-                    pred_val = values_acting[i].item()
-                    true_target = value_targets_list[i]
-                    
-                    metrics_collector.log_training_example(
-                        training_iteration=training_iteration,
-                        value_pred=float(pred_val),
-                        vp_gain=float(true_target),
-                    )
 
             optimizer_step += 1
 
@@ -255,3 +223,6 @@ def _log_prob_action(
         ]
 
     return logp
+
+
+#TODO: Implement proper batching ight now i do forawrd model everytime. i should use the batching on my transformer correctly need to do a proper padding for my units.

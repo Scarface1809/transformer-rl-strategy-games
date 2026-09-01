@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import torch
 import numpy as np
-from typing import TYPE_CHECKING
 
 from agents.random_agent import RandomAgent
 from agents.simple_agent import SimpleAgent
@@ -10,10 +9,6 @@ from envs.core.entities import GameLog, Action
 from envs.core.enums import Player
 from envs.env import SimpleHispaniaEnv
 from mcts import MCTS
-
-if TYPE_CHECKING:
-    from metrics import MetricsCollector
-
 
 def evaluate(
     env: SimpleHispaniaEnv,
@@ -24,11 +19,8 @@ def evaluate(
     mcts_sims: int = 50,
     mcts_c_puct: float = 1.0,
     mcts_deterministic: bool = True,
-    metrics_collector: MetricsCollector | None = None,
-    eval_num: int = 0,
     eval_debug: bool = False,
 ) -> tuple[dict, list[dict]]:
-    model.eval()
     learner_agent = SimpleAgent(model, device=device, debug=eval_debug)
     mcts = MCTS(
         agent=learner_agent,
@@ -78,6 +70,8 @@ def evaluate(
 
                 player = nation_to_player[nation]
                 if player == learner_player:
+                    mcts.reset()  # Start a fresh search from the current state.
+
                     _, action = mcts.run(
                         env,
                         n_simulations=mcts_sims,
@@ -92,6 +86,8 @@ def evaluate(
                 game_actions.append(action)
 
                 env.step(action)
+                if player == learner_player:
+                    mcts.confirm_step(env.state)    # TODO: Can remove this pretty sure since its a fresh start in the eval mode
                 if record_all:
                     game_log.actions.append(action.to_dict())
                     game_log.states.append(env.state.to_dict())
@@ -144,19 +140,5 @@ def evaluate(
         "max_return": max(returns_per_game),
         "min_return": min(returns_per_game),
     }
-    
-    # Log evaluation metrics if collector is provided
-    if metrics_collector is not None:
-        metrics_collector.log_evaluation(
-            eval_num=eval_num,
-            checkpoint_name=f"eval_{eval_num}",
-            training_iteration=0,  # Not readily available in this context
-            num_games=num_games,
-            wins_vs_random=wins,
-            wins_vs_heuristic=0,  # Not applicable in current setup
-            draws=ties,
-            returns=returns_per_game,
-        )
 
-    model.train()
     return summary, (all_game_logs if record_all else [])

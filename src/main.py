@@ -18,7 +18,6 @@ from envs.env import SimpleHispaniaEnv
 from evaluate import evaluate
 from models.simple_model import SimpleModel
 from logging_manager import LogManager
-from metrics import MetricsCollector
 import plotting
 # =============================================================================
 # Builders
@@ -68,25 +67,6 @@ def build_model(
             max_turns=env.config.max_turns,
         )
     raise ValueError(f"Unknown model type: {model_cfg.model_type!r}")
-
-# TODO: Maybe / Probably remove this!!
-def _extract_game_returns(
-    game_logs: list[Dict], env: SimpleHispaniaEnv
-) -> list[float]:
-    learner_player: Player = Player.PLAYER_1
-    game_returns: list[float] = []
-    for game_log in game_logs:
-        final_state: Dict = dict(game_log.get("final_state", {}))
-        scores: Dict = dict(final_state.get("vp_scores", {}))
-        player_scores: Dict[Player, float] = {
-            player: float(
-                sum(scores.get(nation.value, 0) for nation in nations)
-            )
-            for player, nations in env.config.player_nations.items()
-        }
-        game_returns.append(player_scores.get(learner_player, 0.0))
-    return game_returns
-
 
 # =============================================================================
 # Main pipeline
@@ -143,7 +123,8 @@ def main() -> None:
                 f"max={summary['max_return']:.1f}, min={summary['min_return']:.1f}"
             )
 
-    # Pre-training evaluation
+    # Pre-training evaluation runs in inference mode.
+    model.eval()
     summary, _ = evaluate(
         env,
         model,
@@ -152,18 +133,13 @@ def main() -> None:
         record_all=False,
         mcts_sims=cfg.training.mcts_sims,
         mcts_c_puct=cfg.training.mcts_c_puct,
-        metrics_collector=None,  # Skip metrics for pre-training eval
-        eval_debug=True,
-        eval_num=0,
+        eval_debug=cfg.evaluation.debug,
     )
     _record_eval(0, summary)
     eval_num += 1
 
     buffer: ReplayBuffer = ReplayBuffer(max_steps=cfg.training.buffer_size)
     agent: SimpleAgent = SimpleAgent(model, device=device, debug=cfg.training.debug)
-    
-    # Initialize metrics collector for detailed logging
-    metrics_collector = MetricsCollector(str(log_manager.get_metrics_dir()))
 
     # Training loop
     games_played: int = 0
@@ -176,6 +152,7 @@ def main() -> None:
         # =========================
         # 1. SELF-PLAY: Data generation
         # =========================
+        model.eval()
         for _ in range(batch):
             games_played += 1
             game_start: float = time.perf_counter()
@@ -203,6 +180,7 @@ def main() -> None:
         # =========================
         # 2. TRAINING: Learn from buffer
         # =========================
+        model.train()
         train_start: float = time.perf_counter()
         epoch_logs: list[Dict]
         epoch_logs, optimizer_step = train_epoch(
@@ -214,8 +192,6 @@ def main() -> None:
             device=device,
             num_epochs=cfg.training.num_train_epochs,
             batch_size=cfg.training.batch_size,
-            metrics_collector=metrics_collector,
-            training_iteration=train_iteration,
             optimizer_step_start=optimizer_step,
         )
         train_time: float = time.perf_counter() - train_start
@@ -233,6 +209,7 @@ def main() -> None:
         is_final_eval: bool = trained >= total
         eval_time: float = 0.0
 
+        model.eval()
         eval_start: float = time.perf_counter()
         summary: Dict
         logs: list[Dict]
@@ -244,9 +221,7 @@ def main() -> None:
             record_all=is_final_eval,
             mcts_sims=cfg.training.mcts_sims,
             mcts_c_puct=cfg.training.mcts_c_puct,
-            metrics_collector=metrics_collector,
             eval_debug=cfg.evaluation.debug,
-            eval_num=eval_num,
         )
         eval_time = time.perf_counter() - eval_start
         eval_num += 1
@@ -256,7 +231,6 @@ def main() -> None:
             {
                 "episode": trained,
                 "summary": summary,
-                "game_returns": _extract_game_returns(logs, env),
             }
         )
 
@@ -275,9 +249,6 @@ def main() -> None:
     # =============================================================================
     # SAVE ALL ARTIFACTS
     # =============================================================================
-    
-    # Flush detailed metrics to disk
-    metrics_collector.flush()
     
     # Save eval games (last 10)
     if all_game_logs:
@@ -328,3 +299,5 @@ def _run_main_with_logging() -> None:
 if __name__ == "__main__":
     _run_main_with_logging()
 
+
+# MCTS add an additional bias in case the action is different from end_phase. Early on training. To help explore.
