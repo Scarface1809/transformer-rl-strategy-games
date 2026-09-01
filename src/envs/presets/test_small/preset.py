@@ -1,14 +1,14 @@
 from __future__ import annotations
 from typing import Dict
 
-from envs.presets.test3x3.data.test3x3_player_nations import TEST3X3_PLAYER_NATIONS
-from envs.core.enums import Nation, Player, EdgeType, UnitType
+from envs.presets.test_small.data.test_small_player_nations import TEST_SMALL_PLAYER_NATIONS
+from envs.core.enums import Nation
 from envs.core.entities import Tile, Unit, Edge
-from envs.presets.test3x3.data.test3x3_tiles import TEST3X3_TILES
-from envs.presets.test3x3.data.test3x3_turn_order import TEST3X3_TURN_ORDER
-from envs.presets.test3x3.data.test3x3_nation_goals import TEST3X3_REWARD_TILES
-from envs.presets.test3x3.data.test3x3_layout import TEST3X3_TILE_POSITIONS
-from envs.presets.test3x3.data.rosters import NATION_ROSTERS
+from envs.presets.test_small.data.test_small_tiles import TEST_SMALL_TILES
+from envs.presets.test_small.data.test_small_turn_order import TEST_SMALL_TURN_ORDER
+from envs.presets.test_small.data.test_small_nation_goals import TEST_SMALL_REWARD_TILES
+from envs.presets.test_small.data.test_small_layout import TEST_SMALL_TILE_POSITIONS
+from envs.presets.test_small.data.rosters import NATION_ROSTERS
 from envs.presets.registry import register_preset
 from envs.presets.config import PresetConfig
 
@@ -26,7 +26,7 @@ _UNITS_PER_TILE = 1
 def _build_board() -> Dict[int, Tile]:
     tiles: Dict[int, Tile] = {}
 
-    for tile_id, data in TEST3X3_TILES.items():
+    for tile_id, data in TEST_SMALL_TILES.items():
         tiles[tile_id] = Tile(
             id=tile_id,
             name=data["name"],
@@ -37,7 +37,7 @@ def _build_board() -> Dict[int, Tile]:
             city_eligible=data["city_eligible"],
         )
 
-    for tile_id, data in TEST3X3_TILES.items():
+    for tile_id, data in TEST_SMALL_TILES.items():
         for nbr_id, edge_type in data["neighbors"]:
             # Forward edge
             if nbr_id not in tiles[tile_id].adjacencies:
@@ -85,16 +85,15 @@ def _build_units(tiles: Dict[int, Tile]) -> Dict[int, Unit]:
 # Registration
 # ---------------------------------------------------------------------------
 
-
-@register_preset("test3x3")
+@register_preset("test_small")
 def _register() -> PresetConfig:
     return PresetConfig(
-        name="test3x3",
+        name="test_small",
         max_turns=20,
-        turn_order=TEST3X3_TURN_ORDER,
-        player_nations=TEST3X3_PLAYER_NATIONS,
-        reward_tiles=TEST3X3_REWARD_TILES,
-        tile_positions=TEST3X3_TILE_POSITIONS,
+        turn_order=TEST_SMALL_TURN_ORDER,
+        player_nations=TEST_SMALL_PLAYER_NATIONS,
+        reward_tiles=TEST_SMALL_REWARD_TILES,
+        tile_positions=TEST_SMALL_TILE_POSITIONS,
         rosters=NATION_ROSTERS,
         board_factory=_build_board,
         units_factory=_build_units,

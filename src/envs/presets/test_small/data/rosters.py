@@ -3,7 +3,7 @@ from typing import Dict
 from envs.core.enums import Nation, UnitType
 from envs.core.entities import UnitStats, Roster
 
-# Test3x3 preset unit stats - simple configuration
+# Test small preset unit stats - simple configuration
 INFANTRY = UnitStats(
     name="Infantry",
     type=UnitType.INFANTRY,

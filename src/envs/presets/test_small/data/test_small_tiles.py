@@ -6,7 +6,7 @@ from envs.core.enums import TerrainType, EdgeType
 # 3 4 5
 # 6 7 8
 # Unit starts on tile 0, reward is on tile 8
-TEST3X3_TILES = {
+TEST_SMALL_TILES = {
     0: {
         "name": "Start",
         "terrain": TerrainType.CLEAR,
