@@ -296,46 +296,6 @@ class Action:
             unit_type=(UnitType(d["unit_type"]) if d.get("unit_type") is not None else None),
         )
 
-def redistribute_turn_end_rewards(
-    rewards: Sequence[Dict[Nation, float]],
-    turn_numbers: Sequence[int],
-    decay: float = 0.95,
-) -> list[Dict[Nation, float]]:
-    if len(rewards) != len(turn_numbers):
-        raise ValueError("rewards and turn_numbers must have the same length")
-
-    if not rewards:
-        return []
-
-    shaped: list[Dict[Nation, float]] = [dict(r) for r in rewards]
-
-    start = 0
-    while start < len(rewards):
-        end = start + 1
-        while end < len(rewards) and turn_numbers[end] == turn_numbers[start]:
-            end += 1
-
-        segment_len = end - start
-        final_rewards = rewards[end - 1]
-
-        if segment_len > 1 and final_rewards:
-            weights = [decay**idx for idx in range(segment_len)]
-            total_weight = sum(weights)
-            if total_weight > 0.0:
-                for nation, reward_value in final_rewards.items():
-                    if reward_value == 0.0:
-                        continue
-                    shaped[end - 1][nation] = shaped[end - 1].get(nation, 0.0) - reward_value
-                    for offset, weight in enumerate(weights):
-                        shaped[start + offset][nation] = (
-                            shaped[start + offset].get(nation, 0.0)
-                            + reward_value * (weight / total_weight)
-                        )
-
-        start = end
-
-    return shaped
-
 @dataclass
 class GameState:
     turn_number: int

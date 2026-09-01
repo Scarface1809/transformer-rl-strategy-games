@@ -18,9 +18,9 @@ from envs.env import SimpleHispaniaEnv
 class SimpleAgent:
 
     def __init__(
-        self, model: torch.nn.Module, device: str = "cpu", debug: bool = False
+        self, model: torch.nn.Module | None, device: str = "cpu", debug: bool = False
     ):
-        self.model = model.to(device)
+        self.model = model.to(device) if model is not None else None
         self.device = device
         self.debug = debug
 
