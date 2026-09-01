@@ -39,7 +39,7 @@ THREE_BY_THREE_TILES = {
     },
     4: {
         "name": "Center",
-        "terrain": TerrainType.CLEAR,
+        "terrain": TerrainType.MOUNTAIN,
         "base_population_points": 3,
         "base_stacking": 3,
         "stacking_modifier": 0,

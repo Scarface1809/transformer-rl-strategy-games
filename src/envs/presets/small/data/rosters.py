@@ -9,15 +9,26 @@ INFANTRY = UnitStats(
     attack=5,
     defense=5,
     to_kill=0,
-    hit_points=1,
-    movement_points=3,
-    quantity_pool=2,
+    hit_points=1, 
+    movement_points=2,
+    quantity_pool=3,
     cost=6,
 )
 
+CAVALRY = UnitStats(
+    name="Cavalry",
+    type=UnitType.CAVALRY,
+    attack=3,
+    defense=5,
+    to_kill=0,
+    hit_points=1,
+    movement_points=4,
+    quantity_pool=1,
+    cost=12,
+)
 
 def _default_roster() -> Roster:
-    return Roster(units={INFANTRY.name: INFANTRY})
+    return Roster(units={INFANTRY.name: INFANTRY, CAVALRY.name: CAVALRY})
 
 
 NATION_ROSTERS: Dict[Nation, Roster] = {

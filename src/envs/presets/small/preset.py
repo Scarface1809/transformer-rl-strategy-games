@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Dict
 
-from envs.core.enums import Nation, Player, EdgeType, UnitType
+from envs.core.enums import Nation
 from envs.core.entities import Tile, Unit, Edge
 from envs.presets.small.data.player_nations import THREE_BY_THREE_PLAYER_NATIONS
 from envs.presets.small.data.tiles import THREE_BY_THREE_TILES
@@ -17,7 +17,7 @@ _STARTING_TILES: Dict[Nation, list[int]] = {
     Nation.ROME: [8],
 }
 
-_UNITS_PER_TILE = 1
+_UNITS_PER_TILE = 2
 
 
 def _build_board() -> Dict[int, Tile]:
